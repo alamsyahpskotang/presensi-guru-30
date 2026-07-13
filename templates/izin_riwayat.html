@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Riwayat Izin{% endblock %}
+{% block content %}
+<h2>Riwayat pengajuan izin</h2>
+<p><a href="/izin">Ajukan izin baru</a></p>
+
+<table border="1" cellpadding="6" style="width:100%; border-collapse:collapse;">
+<tr><th>Tanggal</th><th>Kategori</th><th>Status</th><th>Catatan kepsek</th></tr>
+{% for izin in daftar %}
+<tr>
+  <td>{{ izin.tanggal }}</td>
+  <td>{{ izin.label_kategori() }}</td>
+  <td>{{ izin.status }}</td>
+  <td>{{ izin.catatan_kepsek or "-" }}</td>
+</tr>
+{% else %}
+<tr><td colspan="4">Belum ada pengajuan izin.</td></tr>
+{% endfor %}
+</table>
+{% endblock %}

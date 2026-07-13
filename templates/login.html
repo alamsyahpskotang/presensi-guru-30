@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Login Guru{% endblock %}
+{% block content %}
+<h2>Login guru</h2>
+{% if error %}<p style="color:#a32d2d;">{{ error }}</p>{% endif %}
+<form method="POST">
+  <label for="nama">Nama guru</label>
+  <input type="text" id="nama" name="nama" required>
+  <label for="pin">PIN</label>
+  <input type="password" id="pin" name="pin" inputmode="numeric" required>
+  <button type="submit" class="btn-primary">Masuk</button>
+</form>
+{% endblock %}

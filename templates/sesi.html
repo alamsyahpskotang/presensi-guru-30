@@ -1,0 +1,120 @@
+{% extends "base.html" %}
+{% block title %}Sesi Kelas Berlangsung{% endblock %}
+{% block content %}
+<h2>{{ sesi.jadwal.kelas.nama_kelas }} - {{ sesi.jadwal.mapel }}</h2>
+<p>Status masuk: <strong>{{ sesi.status_masuk }}</strong>
+  {% if sesi.status_masuk == "telat" %}({{ sesi.menit_telat }} menit){% endif %}
+</p>
+
+<h3>1. Foto kegiatan kelas</h3>
+<video id="video" autoplay playsinline style="width:100%; max-width:360px; background:#000;"></video><br>
+<button id="btn_foto">Ambil foto</button>
+<canvas id="canvas" style="display:none;"></canvas>
+<p id="foto_status"></p>
+
+<h3>2. Verifikasi siswa (isi di jam terakhir)</h3>
+<p id="reminder_ttd" style="display:none; background:var(--surface-1); border-left:4px solid #BA7517; padding:10px 12px; border-radius:4px; color:#854F0B;"></p>
+<label for="nama_siswa">Nama siswa perwakilan</label>
+<input type="text" id="nama_siswa" placeholder="Nama lengkap siswa">
+<p style="font-size:13px;">Tanda tangan siswa (siswa isi sendiri):</p>
+<canvas id="ttd_canvas" width="340" height="150" style="border:1px solid #999; touch-action:none;"></canvas><br>
+<button id="btn_clear_ttd">Hapus</button>
+<button id="btn_simpan_ttd">Simpan tanda tangan</button>
+<p id="ttd_status"></p>
+
+<h3>3. Selesai jam pelajaran</h3>
+<button id="btn_keluar" class="btn-primary">Scan keluar kelas</button>
+<p id="keluar_status"></p>
+
+<script>
+const sesiId = {{ sesi.id }};
+
+// --- Kamera ---
+const video = document.getElementById("video");
+const canvas = document.getElementById("canvas");
+navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
+  .then(stream => video.srcObject = stream)
+  .catch(() => document.getElementById("foto_status").textContent = "Kamera tidak dapat diakses");
+
+document.getElementById("btn_foto").onclick = () => {
+  canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  canvas.toBlob(blob => {
+    const fd = new FormData();
+    fd.append("foto", blob, "kegiatan.jpg");
+    fetch(`/api/upload-foto/${sesiId}`, { method: "POST", body: fd })
+      .then(r => r.json())
+      .then(d => document.getElementById("foto_status").textContent = d.ok ? "Foto tersimpan" : d.error);
+  }, "image/jpeg", 0.85);
+};
+
+// --- Reminder otomatis TTD siswa (15 menit sebelum jam pelajaran berakhir) ---
+const jamSelesai = "{{ sesi.jadwal.jam_selesai }}"; // format "HH:MM"
+let ttdTersimpan = false;
+
+function cekReminderTtd() {
+  if (ttdTersimpan) return;
+  const [jamS, menitS] = jamSelesai.split(":").map(Number);
+  const now = new Date();
+  const target = new Date();
+  target.setHours(jamS, menitS, 0, 0);
+  const sisaMenit = (target - now) / 60000;
+
+  const el = document.getElementById("reminder_ttd");
+  if (sisaMenit <= 15 && sisaMenit > -30) {
+    el.style.display = "block";
+    el.textContent = sisaMenit > 0
+      ? `Jam pelajaran akan selesai ${Math.max(0, Math.round(sisaMenit))} menit lagi. Serahkan HP ke siswa perwakilan untuk isi tanda tangan sekarang.`
+      : "Jam pelajaran sudah selesai dan tanda tangan siswa belum diisi. Segera lengkapi.";
+    if (navigator.vibrate) navigator.vibrate(200);
+  } else {
+    el.style.display = "none";
+  }
+}
+cekReminderTtd();
+setInterval(cekReminderTtd, 30000);
+
+// --- Tanda tangan siswa ---
+const ttdCanvas = document.getElementById("ttd_canvas");
+const ctx = ttdCanvas.getContext("2d");
+let drawing = false;
+function pos(e) {
+  const r = ttdCanvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+ttdCanvas.addEventListener("pointerdown", e => { drawing = true; const p = pos(e); ctx.beginPath(); ctx.moveTo(p.x, p.y); });
+ttdCanvas.addEventListener("pointermove", e => { if (!drawing) return; const p = pos(e); ctx.lineTo(p.x, p.y); ctx.stroke(); });
+window.addEventListener("pointerup", () => drawing = false);
+
+document.getElementById("btn_clear_ttd").onclick = () => ctx.clearRect(0, 0, ttdCanvas.width, ttdCanvas.height);
+
+document.getElementById("btn_simpan_ttd").onclick = () => {
+  const nama_siswa = document.getElementById("nama_siswa").value;
+  const ttd_base64 = ttdCanvas.toDataURL("image/png");
+  fetch(`/api/simpan-ttd/${sesiId}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nama_siswa, ttd_base64 })
+  })
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById("ttd_status").textContent = d.ok ? "Tanda tangan tersimpan" : d.error;
+    if (d.ok) {
+      ttdTersimpan = true;
+      document.getElementById("reminder_ttd").style.display = "none";
+    }
+  });
+};
+
+// --- Scan keluar ---
+document.getElementById("btn_keluar").onclick = () => {
+  fetch(`/api/scan-keluar/${sesiId}`, { method: "POST" })
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById("keluar_status").textContent = d.lengkap
+        ? "Sesi selesai, data lengkap"
+        : "Sesi ditutup, tapi data belum lengkap (foto/TTD)";
+    });
+};
+</script>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Scan QR Kelas{% endblock %}
+{% block content %}
+<h2>Scan QR kelas</h2>
+<p>Masuk sebagai: <strong>{{ guru_nama }}</strong> - <a href="/logout">keluar</a></p>
+<p><a href="/izin">Ajukan izin (sakit/dinas luar/cuti)</a></p>
+
+<div id="reader" style="width:100%; max-width:400px; margin-top:1rem;"></div>
+<p id="status_msg"></p>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+<script>
+function onScanSuccess(kode_qr) {
+  fetch("/api/scan-masuk", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({kode_qr})
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.error) {
+      document.getElementById("status_msg").textContent = data.error;
+      return;
+    }
+    window.location.href = "/sesi/" + data.sesi_id;
+  });
+}
+
+const scanner = new Html5Qrcode("reader");
+scanner.start({ facingMode: "environment" }, { fps: 10, qrbox: 250 }, onScanSuccess);
+</script>
+{% endblock %}
+

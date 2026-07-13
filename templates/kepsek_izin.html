@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Persetujuan Izin{% endblock %}
+{% block content %}
+<h2>Persetujuan izin guru</h2>
+<p><a href="/dashboard">Lihat dashboard presensi hari ini</a></p>
+
+<h3>Menunggu persetujuan ({{ menunggu|length }})</h3>
+{% for izin in menunggu %}
+<div style="border:1px solid #ccc; border-radius:8px; padding:10px; margin-bottom:10px;">
+  <p style="margin:0;"><strong>{{ izin.guru.nama }}</strong> - {{ izin.tanggal }}</p>
+  <p style="margin:4px 0; font-size:13px;">Kategori: {{ izin.label_kategori() }} | Jam: {{ izin.jam_terdampak }}</p>
+  {% if izin.keterangan %}<p style="margin:4px 0; font-size:13px;">Keterangan: {{ izin.keterangan }}</p>{% endif %}
+  {% if izin.guru_pengganti_nama %}<p style="margin:4px 0; font-size:13px;">Guru pengganti: {{ izin.guru_pengganti_nama }}</p>{% endif %}
+
+  <form method="POST" action="/kepsek/izin/{{ izin.id }}/putuskan">
+    <input type="text" name="catatan" placeholder="Catatan (opsional)">
+    <div style="display:flex; gap:8px;">
+      <button type="submit" name="keputusan" value="disetujui" class="btn-primary">Setujui</button>
+      <button type="submit" name="keputusan" value="ditolak">Tolak</button>
+    </div>
+  </form>
+</div>
+{% else %}
+<p>Tidak ada pengajuan yang menunggu.</p>
+{% endfor %}
+
+<h3>Riwayat terbaru</h3>
+<table border="1" cellpadding="6" style="width:100%; border-collapse:collapse;">
+<tr><th>Guru</th><th>Tanggal</th><th>Kategori</th><th>Status</th></tr>
+{% for izin in riwayat %}
+<tr>
+  <td>{{ izin.guru.nama }}</td>
+  <td>{{ izin.tanggal }}</td>
+  <td>{{ izin.label_kategori() }}</td>
+  <td>{{ izin.status }}</td>
+</tr>
+{% endfor %}
+</table>
+{% endblock %}

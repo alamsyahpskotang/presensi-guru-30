@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Ajukan Izin{% endblock %}
+{% block content %}
+<h2>Ajukan izin</h2>
+<p><a href="/izin/riwayat">Lihat riwayat pengajuan saya</a></p>
+
+<form method="POST">
+  <label for="tanggal">Tanggal</label>
+  <input type="date" id="tanggal" name="tanggal" required>
+
+  <label for="kategori">Kategori</label>
+  <select id="kategori" name="kategori" required>
+    <option value="sakit">Sakit</option>
+    <option value="dinas_luar">Dinas luar</option>
+    <option value="cuti">Cuti</option>
+  </select>
+
+  <label for="jam_terdampak">Jam terdampak</label>
+  <select id="jam_terdampak" name="jam_terdampak">
+    <option value="semua">Seluruh jam mengajar hari itu</option>
+    <option value="tentukan">Tentukan jam tertentu (isi di keterangan)</option>
+  </select>
+
+  <label for="guru_pengganti">Guru pengganti (opsional)</label>
+  <input type="text" id="guru_pengganti" name="guru_pengganti" placeholder="Nama guru pengganti jika ada">
+
+  <label for="keterangan">Keterangan</label>
+  <textarea id="keterangan" name="keterangan" rows="3" placeholder="Contoh: sakit demam, surat dokter menyusul"></textarea>
+
+  <button type="submit" class="btn-primary">Ajukan izin</button>
+</form>
+{% endblock %}
