@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+instance/
+uploads/foto/*.jpg
+uploads/ttd/*.png
+.env
