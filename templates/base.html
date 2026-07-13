@@ -12,7 +12,18 @@
 </head>
 <body>
 <div class="container">
+  <div class="nav-bar">
+    <button type="button" class="nav-btn" onclick="history.back()">&larr; Kembali</button>
+    <a href="/" class="nav-btn">Beranda</a>
+  </div>
+
+  <div class="logo-wrap">
+    <img src="/static/images/logo-tangerang.png" alt="Logo Kota Tangerang" class="logo-kota">
+  </div>
+
   {% block content %}{% endblock %}
+
+  <footer class="footer-app">designed by Altrade1980</footer>
 </div>
 </body>
 </html>

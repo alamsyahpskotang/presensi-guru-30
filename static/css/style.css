@@ -8,5 +8,21 @@ button, select, input, textarea, .btn {
   font-family: inherit;
 }
 textarea { text-align: left; }
+
+.nav-bar { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.nav-btn {
+  display: inline-block; width: auto; padding: 8px 14px; margin: 0;
+  border: 1px solid #ccc; border-radius: 8px; background: #fff; font-size: 13px;
+  text-align: center; text-decoration: none; color: #222; cursor: pointer;
+}
+.nav-btn:hover { background: #f0f0eb; }
+
+.logo-wrap { display: flex; justify-content: center; margin-bottom: 1rem; }
+.logo-kota { max-width: 90px; width: 100%; height: auto; }
+
+.footer-app {
+  text-align: center; font-size: 11px; color: #999; margin-top: 2rem;
+  padding-top: 1rem; border-top: 1px solid #e0e0da;
+}
 .btn-primary, button.btn-primary { background: #0F6E56; color: #fff; border: none; }
 table { font-size: 13px; }
