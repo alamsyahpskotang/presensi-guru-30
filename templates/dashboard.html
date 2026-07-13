@@ -2,12 +2,12 @@
 {% block title %}Dashboard Presensi{% endblock %}
 {% block content %}
 <h2>Dashboard - {{ tanggal }}</h2>
-<p><a href="/kepsek/izin">Kelola pengajuan izin</a></p>
+<p><a href="/kepsek/izin">Kelola pengajuan izin</a> | <a href="/kepsek/export">Unduh rekap presensi (Excel)</a></p>
 
 <table border="1" cellpadding="6" style="width:100%; border-collapse:collapse;">
 <tr>
   <th>Guru</th><th>Kelas</th><th>Mapel</th><th>Status masuk</th><th>Jam masuk</th>
-  <th>Foto</th><th>TTD siswa</th><th>Jam keluar</th>
+  <th>Foto</th><th>TTD siswa</th><th>Jam keluar</th><th>Status keluar</th>
 </tr>
 {% for sesi in sesi_list %}
 <tr>
@@ -19,9 +19,21 @@
     {% if sesi.status_masuk == "telat" %}({{ sesi.menit_telat }} menit){% endif %}
   </td>
   <td>{{ sesi.waktu_scan_masuk.strftime("%H:%M") if sesi.waktu_scan_masuk else "-" }}</td>
-  <td>{{ "Ada" if sesi.foto_kegiatan_path else "-" }}</td>
+  <td>{% if sesi.foto_kegiatan_path %}<a href="/uploads/{{ sesi.foto_kegiatan_path }}" target="_blank">Lihat foto</a>{% else %}-{% endif %}</td>
   <td>{{ sesi.nama_siswa_verifikasi or "-" }}</td>
   <td>{{ sesi.waktu_scan_keluar.strftime("%H:%M") if sesi.waktu_scan_keluar else "Belum" }}</td>
+  <td>
+    {% set status_keluar = sesi.status_keluar() %}
+    {% if status_keluar == "tepat_waktu" %}
+      <span style="color:#0F6E56;">Keluar tepat waktu</span>
+    {% elif status_keluar == "sebelum_waktunya" %}
+      <span style="color:#A32D2D;">Keluar sebelum waktunya</span>
+    {% elif status_keluar == "kelebihan_waktu" %}
+      <span style="color:#BA7517;">Kelebihan waktu</span>
+    {% else %}
+      -
+    {% endif %}
+  </td>
 </tr>
 {% endfor %}
 {% for jadwal, izin in jadwal_izin %}
@@ -29,7 +41,7 @@
   <td>{{ jadwal.guru.nama }}</td>
   <td>{{ jadwal.kelas.nama_kelas }}</td>
   <td>{{ jadwal.mapel }}</td>
-  <td colspan="5">Izin resmi - {{ izin.label_kategori() }}{% if izin.guru_pengganti_nama %} (pengganti: {{ izin.guru_pengganti_nama }}){% endif %}</td>
+  <td colspan="6">Izin resmi - {{ izin.label_kategori() }}{% if izin.guru_pengganti_nama %} (pengganti: {{ izin.guru_pengganti_nama }}){% endif %}</td>
 </tr>
 {% endfor %}
 </table>

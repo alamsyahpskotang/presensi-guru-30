@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}Unduh Rekap Presensi{% endblock %}
+{% block content %}
+<h2>Unduh rekap presensi</h2>
+<p><a href="/dashboard">Kembali ke dashboard</a></p>
+
+<form method="POST" action="/kepsek/export/unduh">
+  <label for="jenis">Pilih periode</label>
+  <select id="jenis" name="jenis" onchange="tampilkanField()">
+    <option value="harian">Harian (1 hari tertentu)</option>
+    <option value="mingguan">Mingguan (7 hari dari tanggal tertentu)</option>
+    <option value="bulanan">Bulanan</option>
+    <option value="custom">Rentang tanggal bebas</option>
+  </select>
+
+  <div id="field-harian">
+    <label>Tanggal</label>
+    <input type="date" name="tanggal">
+  </div>
+
+  <div id="field-mingguan" style="display:none;">
+    <label>Mulai dari tanggal (7 hari ke depan akan diambil)</label>
+    <input type="date" name="minggu_dari">
+  </div>
+
+  <div id="field-bulanan" style="display:none;">
+    <label>Bulan</label>
+    <input type="month" name="bulan">
+  </div>
+
+  <div id="field-custom" style="display:none;">
+    <label>Dari tanggal</label>
+    <input type="date" name="tgl_awal">
+    <label>Sampai tanggal</label>
+    <input type="date" name="tgl_akhir">
+  </div>
+
+  <button type="submit" class="btn-primary">Unduh file Excel</button>
+</form>
+
+<p style="font-size:13px; color:#5F5E5A;">
+  File Excel berisi 3 sheet: rincian tiap sesi presensi, ringkasan
+  performa per guru (jumlah tepat waktu/telat, kelengkapan bukti), dan
+  daftar izin resmi pada periode yang dipilih.
+</p>
+
+<script>
+function tampilkanField() {
+  const jenis = document.getElementById("jenis").value;
+  ["harian", "mingguan", "bulanan", "custom"].forEach(function (j) {
+    document.getElementById("field-" + j).style.display = (j === jenis) ? "block" : "none";
+  });
+}
+</script>
+{% endblock %}

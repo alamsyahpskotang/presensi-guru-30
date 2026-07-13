@@ -1,9 +1,12 @@
 import os
 import base64
 import uuid
-from datetime import datetime, date
+import calendar
+from io import BytesIO
+from datetime import datetime, date, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, send_from_directory, session, redirect, url_for
+from flask import Flask, request, jsonify, render_template, send_from_directory, session, redirect, url_for, send_file
+import pandas as pd
 
 from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
@@ -186,6 +189,115 @@ def kepsek_putuskan_izin(izin_id):
     izin.catatan_kepsek = request.form.get("catatan", "").strip()
     db.session.commit()
     return redirect(url_for("halaman_kepsek_izin"))
+
+
+@app.route("/kepsek/export")
+@kepsek_required
+def halaman_export():
+    return render_template("kepsek_export.html")
+
+
+@app.route("/kepsek/export/unduh", methods=["POST"])
+@kepsek_required
+def unduh_export():
+    jenis = request.form.get("jenis")
+
+    if jenis == "harian":
+        tanggal = datetime.strptime(request.form["tanggal"], "%Y-%m-%d").date()
+        tgl_awal = tgl_akhir = tanggal
+    elif jenis == "mingguan":
+        tgl_awal = datetime.strptime(request.form["minggu_dari"], "%Y-%m-%d").date()
+        tgl_akhir = tgl_awal + timedelta(days=6)
+    elif jenis == "bulanan":
+        tahun, bulan = map(int, request.form["bulan"].split("-"))
+        tgl_awal = date(tahun, bulan, 1)
+        tgl_akhir = date(tahun, bulan, calendar.monthrange(tahun, bulan)[1])
+    else:  # custom
+        tgl_awal = datetime.strptime(request.form["tgl_awal"], "%Y-%m-%d").date()
+        tgl_akhir = datetime.strptime(request.form["tgl_akhir"], "%Y-%m-%d").date()
+
+    if tgl_akhir < tgl_awal:
+        return "Tanggal akhir tidak boleh sebelum tanggal awal", 400
+
+    sesi_list = (
+        SesiPresensi.query.filter(SesiPresensi.tanggal >= tgl_awal, SesiPresensi.tanggal <= tgl_akhir)
+        .order_by(SesiPresensi.tanggal, SesiPresensi.jadwal_id)
+        .all()
+    )
+
+    baris_detail = []
+    for s in sesi_list:
+        baris_detail.append({
+            "Tanggal": s.tanggal.strftime("%Y-%m-%d"),
+            "Hari": HARI_ID[s.tanggal.weekday()],
+            "Guru": s.jadwal.guru.nama,
+            "Kelas": s.jadwal.kelas.nama_kelas,
+            "Mapel": s.jadwal.mapel,
+            "Jam ke": s.jadwal.jam_ke,
+            "Jadwal mulai": s.jadwal.jam_mulai,
+            "Jadwal selesai": s.jadwal.jam_selesai,
+            "Jam scan masuk": s.waktu_scan_masuk.strftime("%H:%M") if s.waktu_scan_masuk else "",
+            "Status masuk": s.status_masuk or "",
+            "Menit telat": s.menit_telat or 0,
+            "Foto ada": "Ya" if s.foto_kegiatan_path else "Tidak",
+            "Nama siswa TTD": s.nama_siswa_verifikasi or "",
+            "Jam scan keluar": s.waktu_scan_keluar.strftime("%H:%M") if s.waktu_scan_keluar else "",
+            "Status keluar": s.status_keluar() or "",
+        })
+    df_detail = pd.DataFrame(baris_detail)
+
+    baris_ringkasan = []
+    if baris_detail:
+        for guru_nama, grp in df_detail.groupby("Guru"):
+            total = len(grp)
+            tepat = int((grp["Status masuk"] == "tepat_waktu").sum())
+            telat = int((grp["Status masuk"] == "telat").sum())
+            rata_telat = grp.loc[grp["Status masuk"] == "telat", "Menit telat"].mean() if telat > 0 else 0
+            lengkap = int(((grp["Foto ada"] == "Ya") & (grp["Nama siswa TTD"] != "")).sum())
+            baris_ringkasan.append({
+                "Guru": guru_nama,
+                "Total sesi tercatat": total,
+                "Tepat waktu": tepat,
+                "Telat": telat,
+                "Rata-rata menit telat": round(rata_telat, 1) if telat > 0 else 0,
+                "Sesi lengkap (foto+TTD)": lengkap,
+                "Persentase lengkap": f"{lengkap / total * 100:.0f}%" if total > 0 else "0%",
+            })
+    df_ringkasan = pd.DataFrame(baris_ringkasan)
+
+    izin_list = PengajuanIzin.query.filter(
+        PengajuanIzin.tanggal >= tgl_awal, PengajuanIzin.tanggal <= tgl_akhir
+    ).all()
+    baris_izin = [{
+        "Guru": i.guru.nama,
+        "Tanggal": i.tanggal.strftime("%Y-%m-%d") if hasattr(i.tanggal, "strftime") else str(i.tanggal),
+        "Kategori": i.label_kategori(),
+        "Status": i.status,
+        "Keterangan": i.keterangan or "",
+        "Catatan kepsek": i.catatan_kepsek or "",
+    } for i in izin_list]
+    df_izin = pd.DataFrame(baris_izin)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        (df_detail if not df_detail.empty else pd.DataFrame([{"Info": "Tidak ada data presensi pada rentang ini"}])).to_excel(
+            writer, sheet_name="Detail Presensi", index=False)
+        (df_ringkasan if not df_ringkasan.empty else pd.DataFrame([{"Info": "Tidak ada data"}])).to_excel(
+            writer, sheet_name="Ringkasan per Guru", index=False)
+        (df_izin if not df_izin.empty else pd.DataFrame([{"Info": "Tidak ada izin pada rentang ini"}])).to_excel(
+            writer, sheet_name="Izin Resmi", index=False)
+
+        # Lebarkan kolom otomatis supaya tidak terpotong saat dibuka
+        for nama_sheet in writer.sheets:
+            ws = writer.sheets[nama_sheet]
+            for kolom in ws.columns:
+                panjang_maks = max((len(str(c.value)) for c in kolom if c.value is not None), default=10)
+                ws.column_dimensions[kolom[0].column_letter].width = min(panjang_maks + 3, 40)
+
+    output.seek(0)
+    nama_file = f"presensi_{jenis}_{tgl_awal}_{tgl_akhir}.xlsx"
+    return send_file(output, as_attachment=True, download_name=nama_file,
+                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 @app.route("/dashboard")

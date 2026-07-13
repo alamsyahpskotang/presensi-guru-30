@@ -72,6 +72,38 @@ class SesiPresensi(db.Model):
         # Guru telat tetap wajib isi foto + TTD siswa di sisa jam pelajaran
         return bool(self.foto_kegiatan_path) and bool(self.ttd_siswa_path)
 
+    def status_keluar(self, toleransi_menit=2):
+        """Bandingkan waktu scan keluar dengan jam_selesai jadwal.
+        Toleransi beberapa menit dianggap tepat waktu (jam dinding tidak selalu presisi detik)."""
+        if not self.waktu_scan_keluar:
+            return None
+        jam_selesai = datetime.strptime(self.jadwal.jam_selesai, "%H:%M").time()
+        target = datetime.combine(self.waktu_scan_keluar.date(), jam_selesai)
+        selisih_menit = (self.waktu_scan_keluar - target).total_seconds() / 60
+
+        if abs(selisih_menit) <= toleransi_menit:
+            return "tepat_waktu"
+        elif selisih_menit < 0:
+            return "sebelum_waktunya"
+        else:
+            return "kelebihan_waktu"
+
+    def status_keluar(self, toleransi_menit=5):
+        """Bandingkan waktu scan keluar dengan jam_selesai jadwal.
+        Toleransi 5 menit dianggap tepat waktu (menghindari selisih detik dianggap salah)."""
+        if not self.waktu_scan_keluar:
+            return None
+        jam_selesai = datetime.strptime(self.jadwal.jam_selesai, "%H:%M").time()
+        target = datetime.combine(self.waktu_scan_keluar.date(), jam_selesai)
+        selisih_menit = (self.waktu_scan_keluar - target).total_seconds() / 60
+
+        if abs(selisih_menit) <= toleransi_menit:
+            return "tepat_waktu"
+        elif selisih_menit < 0:
+            return "sebelum_waktunya"
+        else:
+            return "kelebihan_waktu"
+
 
 class PengajuanIzin(db.Model):
     id = db.Column(db.Integer, primary_key=True)
