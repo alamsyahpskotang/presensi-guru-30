@@ -70,6 +70,42 @@ def logout():
     return redirect(url_for("halaman_login"))
 
 
+@app.route("/setup-data-awal/<kode_rahasia>")
+def setup_data_awal(kode_rahasia):
+    """
+    Endpoint darurat untuk mengisi data guru/kelas/jadwal contoh tanpa
+    perlu akses Shell (fitur Shell dikunci di tier gratis Render).
+    Akses lewat browser: https://domain-anda.com/setup-data-awal/KODE_RAHASIA
+    KODE_RAHASIA diatur lewat env var SETUP_SECRET - WAJIB diganti dari default.
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    if Guru.query.count() > 0:
+        return "Data guru sudah ada (%d guru), tidak diisi ulang. Hapus manual dulu kalau mau reset." % Guru.query.count()
+
+    g1 = Guru(nama="Bu Sari", nip="19800101", mapel="IPA", pin="1234")
+    g2 = Guru(nama="Pak Budi", nip="19790202", mapel="Matematika", pin="5678")
+    db.session.add_all([g1, g2])
+    db.session.commit()
+
+    k1 = Kelas(nama_kelas="VII-A", kode_qr="KELAS-VIIA-SMPN30")
+    k2 = Kelas(nama_kelas="VIII-B", kode_qr="KELAS-VIIIB-SMPN30")
+    db.session.add_all([k1, k2])
+    db.session.commit()
+
+    hari_ini = HARI_ID[datetime.now().weekday()]
+    j1 = Jadwal(guru_id=g1.id, kelas_id=k1.id, hari=hari_ini, jam_ke="3-4",
+                jam_mulai="07:45", jam_selesai="09:15", mapel="IPA")
+    j2 = Jadwal(guru_id=g2.id, kelas_id=k2.id, hari=hari_ini, jam_ke="1-2",
+                jam_mulai="07:00", jam_selesai="08:30", mapel="Matematika")
+    db.session.add_all([j1, j2])
+    db.session.commit()
+
+    return "Berhasil! Data contoh dibuat untuk hari %s. Login: Bu Sari/1234 atau Pak Budi/5678" % hari_ini
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
