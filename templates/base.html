@@ -15,6 +15,9 @@
   <div class="nav-bar">
     <button type="button" class="nav-btn" onclick="history.back()">&larr; Kembali</button>
     <a href="/" class="nav-btn">Beranda</a>
+    {% if session.get('guru_id') or session.get('kepsek_login') %}
+    <a href="/logout" class="nav-btn nav-btn-logout">Keluar</a>
+    {% endif %}
   </div>
 
   <div class="logo-wrap">

@@ -9,13 +9,15 @@ button, select, input, textarea, .btn {
 }
 textarea { text-align: left; }
 
-.nav-bar { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; }
+.nav-bar { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
 .nav-btn {
   display: inline-block; width: auto; padding: 8px 14px; margin: 0;
   border: 1px solid #ccc; border-radius: 8px; background: #fff; font-size: 13px;
   text-align: center; text-decoration: none; color: #222; cursor: pointer;
 }
 .nav-btn:hover { background: #f0f0eb; }
+.nav-btn-logout { border-color: #d8b0b0; color: #a32d2d; margin-left: auto; }
+.nav-btn-logout:hover { background: #fbeaea; }
 
 .logo-wrap { display: flex; justify-content: center; margin-bottom: 1rem; }
 .logo-kota { max-width: 90px; width: 100%; height: auto; }
