@@ -1,9 +1,23 @@
+import math
 from datetime import datetime
 from flask_sqlalchemy import SQLAlchemy
 
 db = SQLAlchemy()
 
 TOLERANSI_TELAT_MENIT = 15
+RADIUS_AMAN_METER_DEFAULT = 200  # radius dianggap "di area sekolah" kalau tidak diset khusus
+
+
+def hitung_jarak_meter(lat1, lng1, lat2, lng2):
+    """Hitung jarak antara dua koordinat pakai formula Haversine, hasil dalam meter."""
+    if None in (lat1, lng1, lat2, lng2):
+        return None
+    R = 6371000  # radius bumi dalam meter
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
 class Guru(db.Model):
@@ -45,10 +59,24 @@ class SesiPresensi(db.Model):
     status_masuk = db.Column(db.String(20))  # tepat_waktu, telat, tidak_hadir
     menit_telat = db.Column(db.Integer, default=0)
 
-    foto_kegiatan_path = db.Column(db.String(200))
-    ttd_siswa_path = db.Column(db.String(200))
+    # Foto & TTD disimpan LANGSUNG di database (bukan file di disk server),
+    # supaya tidak hilang saat server redeploy/restart (disk Render tier gratis
+    # bersifat sementara / ephemeral).
+    foto_kegiatan_data = db.Column(db.LargeBinary)
+    foto_kegiatan_mime = db.Column(db.String(40))
+    ttd_siswa_data = db.Column(db.LargeBinary)
+    ttd_siswa_mime = db.Column(db.String(40))
+
     nama_siswa_verifikasi = db.Column(db.String(120))
     waktu_ttd = db.Column(db.DateTime)
+
+    # Lokasi GPS saat scan masuk & keluar (diambil dari browser HP guru)
+    lat_masuk = db.Column(db.Float)
+    lng_masuk = db.Column(db.Float)
+    jarak_masuk_meter = db.Column(db.Float)  # jarak dari titik sekolah, kalau koordinat sekolah sudah diset
+    lat_keluar = db.Column(db.Float)
+    lng_keluar = db.Column(db.Float)
+    jarak_keluar_meter = db.Column(db.Float)
 
     catatan = db.Column(db.String(300))
 
@@ -70,23 +98,7 @@ class SesiPresensi(db.Model):
 
     def kelengkapan_bukti(self):
         # Guru telat tetap wajib isi foto + TTD siswa di sisa jam pelajaran
-        return bool(self.foto_kegiatan_path) and bool(self.ttd_siswa_path)
-
-    def status_keluar(self, toleransi_menit=2):
-        """Bandingkan waktu scan keluar dengan jam_selesai jadwal.
-        Toleransi beberapa menit dianggap tepat waktu (jam dinding tidak selalu presisi detik)."""
-        if not self.waktu_scan_keluar:
-            return None
-        jam_selesai = datetime.strptime(self.jadwal.jam_selesai, "%H:%M").time()
-        target = datetime.combine(self.waktu_scan_keluar.date(), jam_selesai)
-        selisih_menit = (self.waktu_scan_keluar - target).total_seconds() / 60
-
-        if abs(selisih_menit) <= toleransi_menit:
-            return "tepat_waktu"
-        elif selisih_menit < 0:
-            return "sebelum_waktunya"
-        else:
-            return "kelebihan_waktu"
+        return bool(self.foto_kegiatan_data) and bool(self.ttd_siswa_data)
 
     def status_keluar(self, toleransi_menit=5):
         """Bandingkan waktu scan keluar dengan jam_selesai jadwal.
@@ -103,6 +115,21 @@ class SesiPresensi(db.Model):
             return "sebelum_waktunya"
         else:
             return "kelebihan_waktu"
+
+    def _label_lokasi(self, jarak_meter, lat, lng, radius_aman):
+        if lat is None or lng is None:
+            return "Lokasi tidak diizinkan"
+        if jarak_meter is None:
+            return "Lokasi tercatat (jarak sekolah belum diset)"
+        if jarak_meter <= radius_aman:
+            return f"Di area sekolah (~{int(jarak_meter)} m)"
+        return f"Di luar area sekolah (~{int(jarak_meter)} m)"
+
+    def label_lokasi_masuk(self, radius_aman=RADIUS_AMAN_METER_DEFAULT):
+        return self._label_lokasi(self.jarak_masuk_meter, self.lat_masuk, self.lng_masuk, radius_aman)
+
+    def label_lokasi_keluar(self, radius_aman=RADIUS_AMAN_METER_DEFAULT):
+        return self._label_lokasi(self.jarak_keluar_meter, self.lat_keluar, self.lng_keluar, radius_aman)
 
 
 class PengajuanIzin(db.Model):

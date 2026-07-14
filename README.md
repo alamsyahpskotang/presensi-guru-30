@@ -102,12 +102,48 @@ Project sudah siap deploy dengan `Procfile` dan `gunicorn`:
    - `SECRET_KEY` - string acak panjang
    - `TELEGRAM_BOT_TOKEN`
    - `KEPSEK_CHAT_ID`
+   - `DATABASE_URL` - wajib untuk data permanen (lihat bagian "Database PostgreSQL" di bawah)
+   - `SEKOLAH_LAT`, `SEKOLAH_LNG` - koordinat GPS sekolah (opsional, untuk
+     deteksi kalau guru scan dari luar area sekolah - lihat bagian
+     "Deteksi lokasi GPS" di bawah)
+   - `RADIUS_AMAN_METER` - opsional, default 200 meter
    (lihat `.env.example` sebagai referensi)
 4. Setelah deploy pertama, jalankan `seed.py` sekali lewat shell hosting
    (Render/Railway sediakan fitur "Shell") untuk isi data awal, lalu
    ganti dengan data jadwal riil.
 5. Domain hosting otomatis HTTPS - kamera dan PWA install akan berfungsi
    normal di HP guru.
+
+## Database PostgreSQL (wajib untuk data permanen)
+
+Tier gratis Render memakai *ephemeral filesystem* - artinya kalau pakai
+database SQLite biasa (default), data akan **hilang** setiap kali ada
+deploy ulang / restart server. Untuk data permanen, buat database
+PostgreSQL gratis di Render, lalu set env var `DATABASE_URL` ke
+"Internal Database URL"-nya. Kode `app.py` sudah otomatis mendeteksi dan
+memakai PostgreSQL kalau `DATABASE_URL` tersedia, dan fallback ke SQLite
+untuk uji coba lokal kalau tidak ada.
+
+**Foto kegiatan dan tanda tangan siswa juga disimpan langsung di
+database** (bukan file terpisah di disk server) - ini supaya bukti-bukti
+itu ikut permanen bersama data lain, tidak hilang saat redeploy.
+
+## Deteksi lokasi GPS
+
+Setiap scan masuk/keluar merekam koordinat GPS dari browser HP guru
+(kalau guru mengizinkan). Kalau `SEKOLAH_LAT` dan `SEKOLAH_LNG` diisi
+(koordinat sekolah, bisa didapat dari Google Maps - klik kanan lokasi
+sekolah, copy angka yang muncul), sistem otomatis menghitung jarak dan
+menandai status:
+- **Di area sekolah** - dalam radius aman (`RADIUS_AMAN_METER`, default 200m)
+- **Di luar area sekolah** - jaraknya melebihi radius aman, ditandai merah di dashboard
+- **Lokasi tidak diizinkan** - guru menolak izin akses lokasi di browser-nya
+
+Catatan penting: GPS **tidak bisa membedakan ruang kelas** yang
+berdekatan (akurasinya cuma sampai radius sekolah secara keseluruhan).
+Fitur ini berguna untuk mendeteksi kasus ekstrem (scan dari luar area
+sekolah sama sekali), bukan untuk memastikan guru ada persis di kelas
+yang benar.
 6. **Catatan database**: SQLite di free tier hosting biasanya tidak
    persisten (hilang saat redeploy). Untuk pilot singkat tidak masalah,
    tapi untuk pemakaian jangka panjang disarankan pindah ke PostgreSQL
@@ -187,3 +223,31 @@ Semua item PR sudah selesai. Sisa langkah sebelum pilot jalan riil:
 kumpulkan jadwal pelajaran SMPN 30 dalam format Excel seperti contoh,
 jalankan `import_excel.py`, cetak QR hasil `generate_qr.py`, lalu deploy
 ke hosting sesuai panduan di atas.
+
+## Batasan sistem dan celah yang perlu diwaspadai (untuk kepala sekolah/pengawas)
+
+Sistem ini membantu mendeteksi ketidakhadiran, tapi **tidak bisa
+sepenuhnya mencegah kecurangan yang disengaja** oleh oknum yang
+berniat mengakali. Beberapa celah yang perlu diwaspadai lewat SOP dan
+sidak berkala, bukan murni bisa ditutup dengan kode:
+
+1. **QR kelas difoto lalu dikirim ke guru lain** - guru bisa scan foto
+   QR yang dikirim rekan, bukan dari lokasi fisik kelas. Deteksi GPS
+   membantu mengurangi ini (kalau discan dari luar area sekolah akan
+   ketahuan), tapi tidak mencegah kalau discan dari halaman sekolah.
+2. **Berbagi PIN** - guru bisa minta orang lain login dan scan atas
+   namanya. Tidak ada verifikasi biometrik di versi ini.
+3. **Foto kegiatan "settingan"** - kamera memang dikunci (tidak bisa
+   upload dari galeri), tapi guru masih bisa memfoto layar/foto lama
+   yang ditampilkan di HP lain. Sistem tidak bisa menilai keaslian isi
+   foto secara otomatis.
+4. **Kolusi TTD siswa** - kalau guru dan siswa yang ditunjuk
+   berkolusi, tanda tangan bisa diisi meski guru sebenarnya tidak
+   mengajar penuh.
+5. **Scan keluar cuma perlu klik** - tidak ada verifikasi kamera saat
+   keluar, hanya timestamp + lokasi GPS (yang juga bisa dimatikan izin
+   aksesnya oleh guru).
+
+**Rekomendasi:** gunakan data dari sistem ini sebagai bahan awal
+diskusi/klarifikasi, dikombinasikan dengan sidak acak berkala oleh
+kepala sekolah/pengawas - bukan sebagai satu-satunya alat bukti mutlak.

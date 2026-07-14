@@ -107,14 +107,32 @@ document.getElementById("btn_simpan_ttd").onclick = () => {
 };
 
 // --- Scan keluar ---
+function ambilLokasi() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve({ lat: null, lng: null }); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve({ lat: null, lng: null }),
+      { timeout: 8000, enableHighAccuracy: true }
+    );
+  });
+}
+
 document.getElementById("btn_keluar").onclick = () => {
-  fetch(`/api/scan-keluar/${sesiId}`, { method: "POST" })
-    .then(r => r.json())
-    .then(d => {
-      document.getElementById("keluar_status").textContent = d.lengkap
-        ? "Sesi selesai, data lengkap"
-        : "Sesi ditutup, tapi data belum lengkap (foto/TTD)";
-    });
+  document.getElementById("keluar_status").textContent = "Memproses...";
+  ambilLokasi().then(({ lat, lng }) => {
+    fetch(`/api/scan-keluar/${sesiId}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lat, lng })
+    })
+      .then(r => r.json())
+      .then(d => {
+        document.getElementById("keluar_status").textContent = d.lengkap
+          ? "Sesi selesai, data lengkap (" + d.lokasi_label + ")"
+          : "Sesi ditutup, tapi data belum lengkap (foto/TTD)";
+      });
+  });
 };
 </script>
 {% endblock %}

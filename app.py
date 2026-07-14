@@ -1,23 +1,17 @@
 import os
 import base64
-import uuid
 import calendar
 from io import BytesIO
 from datetime import datetime, date, timedelta
 from functools import wraps
-from flask import Flask, request, jsonify, render_template, send_from_directory, session, redirect, url_for, send_file
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for, send_file, Response
 import pandas as pd
 
-from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog
+from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-UPLOAD_FOTO = os.path.join(BASE_DIR, "uploads", "foto")
-UPLOAD_TTD = os.path.join(BASE_DIR, "uploads", "ttd")
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
-
-os.makedirs(UPLOAD_FOTO, exist_ok=True)
-os.makedirs(UPLOAD_TTD, exist_ok=True)
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 
 app = Flask(__name__)
@@ -34,6 +28,15 @@ else:
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.secret_key = os.environ.get("SECRET_KEY", "ganti-secret-key-ini-di-produksi")
 KEPSEK_PIN = os.environ.get("KEPSEK_PIN", "999999")
+
+# Koordinat sekolah untuk deteksi jarak scan (opsional - kalau tidak diset,
+# lokasi tetap dicatat tapi tidak dihitung jarak/status area amannya).
+SEKOLAH_LAT = os.environ.get("SEKOLAH_LAT")
+SEKOLAH_LNG = os.environ.get("SEKOLAH_LNG")
+SEKOLAH_LAT = float(SEKOLAH_LAT) if SEKOLAH_LAT else None
+SEKOLAH_LNG = float(SEKOLAH_LNG) if SEKOLAH_LNG else None
+RADIUS_AMAN_METER = int(os.environ.get("RADIUS_AMAN_METER", "200"))
+
 db.init_app(app)
 
 HARI_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
@@ -248,10 +251,13 @@ def unduh_export():
             "Jam scan masuk": s.waktu_scan_masuk.strftime("%H:%M") if s.waktu_scan_masuk else "",
             "Status masuk": s.status_masuk or "",
             "Menit telat": s.menit_telat or 0,
-            "Foto ada": "Ya" if s.foto_kegiatan_path else "Tidak",
+            "Lokasi masuk": s.label_lokasi_masuk(RADIUS_AMAN_METER),
+            "Foto ada": "Ya" if s.foto_kegiatan_data else "Tidak",
+            "Link foto": (request.host_url.rstrip("/") + url_for("media_foto", sesi_id=s.id)) if s.foto_kegiatan_data else "",
             "Nama siswa TTD": s.nama_siswa_verifikasi or "",
             "Jam scan keluar": s.waktu_scan_keluar.strftime("%H:%M") if s.waktu_scan_keluar else "",
             "Status keluar": s.status_keluar() or "",
+            "Lokasi keluar": s.label_lokasi_keluar(RADIUS_AMAN_METER),
         })
     df_detail = pd.DataFrame(baris_detail)
 
@@ -351,6 +357,8 @@ def api_scan_masuk():
     data = request.get_json()
     kode_qr = data.get("kode_qr")
     guru_id = session.get("guru_id")
+    lat = data.get("lat")
+    lng = data.get("lng")
 
     kelas = Kelas.query.filter_by(kode_qr=kode_qr).first()
     if not kelas:
@@ -377,6 +385,13 @@ def api_scan_masuk():
     sesi.jadwal = jadwal
     sesi.waktu_scan_masuk = sekarang
     sesi.hitung_status_masuk()
+
+    if lat is not None and lng is not None:
+        sesi.lat_masuk = lat
+        sesi.lng_masuk = lng
+        if SEKOLAH_LAT is not None and SEKOLAH_LNG is not None:
+            sesi.jarak_masuk_meter = hitung_jarak_meter(lat, lng, SEKOLAH_LAT, SEKOLAH_LNG)
+
     db.session.commit()
 
     return jsonify({
@@ -385,6 +400,7 @@ def api_scan_masuk():
         "menit_telat": sesi.menit_telat,
         "kelas": kelas.nama_kelas,
         "mapel": jadwal.mapel,
+        "lokasi_label": sesi.label_lokasi_masuk(RADIUS_AMAN_METER),
     })
 
 
@@ -398,13 +414,10 @@ def api_upload_foto(sesi_id):
     if not file:
         return jsonify({"error": "Foto tidak ditemukan"}), 400
 
-    nama_file = f"{sesi_id}_{uuid.uuid4().hex[:8]}.jpg"
-    path = os.path.join(UPLOAD_FOTO, nama_file)
-    file.save(path)
-
-    sesi.foto_kegiatan_path = f"foto/{nama_file}"
+    sesi.foto_kegiatan_data = file.read()
+    sesi.foto_kegiatan_mime = file.mimetype or "image/jpeg"
     db.session.commit()
-    return jsonify({"ok": True, "path": sesi.foto_kegiatan_path})
+    return jsonify({"ok": True, "url": url_for("media_foto", sesi_id=sesi_id)})
 
 
 @app.route("/api/simpan-ttd/<int:sesi_id>", methods=["POST"])
@@ -421,12 +434,8 @@ def api_simpan_ttd(sesi_id):
         return jsonify({"error": "Nama siswa dan tanda tangan wajib diisi"}), 400
 
     header, encoded = ttd_base64.split(",", 1) if "," in ttd_base64 else (None, ttd_base64)
-    nama_file = f"{sesi_id}_{uuid.uuid4().hex[:8]}.png"
-    path = os.path.join(UPLOAD_TTD, nama_file)
-    with open(path, "wb") as f:
-        f.write(base64.b64decode(encoded))
-
-    sesi.ttd_siswa_path = f"ttd/{nama_file}"
+    sesi.ttd_siswa_data = base64.b64decode(encoded)
+    sesi.ttd_siswa_mime = "image/png"
     sesi.nama_siswa_verifikasi = nama_siswa
     sesi.waktu_ttd = datetime.now()
     db.session.commit()
@@ -439,18 +448,54 @@ def api_scan_keluar(sesi_id):
     sesi = SesiPresensi.query.get_or_404(sesi_id)
     if sesi.jadwal.guru_id != session.get("guru_id"):
         return jsonify({"error": "Bukan sesi Anda"}), 403
+
+    data = request.get_json(silent=True) or {}
+    lat = data.get("lat")
+    lng = data.get("lng")
+
     sesi.waktu_scan_keluar = datetime.now()
+
+    if lat is not None and lng is not None:
+        sesi.lat_keluar = lat
+        sesi.lng_keluar = lng
+        if SEKOLAH_LAT is not None and SEKOLAH_LNG is not None:
+            sesi.jarak_keluar_meter = hitung_jarak_meter(lat, lng, SEKOLAH_LAT, SEKOLAH_LNG)
 
     if not sesi.kelengkapan_bukti():
         sesi.catatan = "Data tidak lengkap: foto atau TTD siswa belum diisi"
 
     db.session.commit()
-    return jsonify({"ok": True, "lengkap": sesi.kelengkapan_bukti()})
+    return jsonify({"ok": True, "lengkap": sesi.kelengkapan_bukti(),
+                     "lokasi_label": sesi.label_lokasi_keluar(RADIUS_AMAN_METER)})
 
 
-@app.route("/uploads/<path:filename>")
-def serve_upload(filename):
-    return send_from_directory(os.path.join(BASE_DIR, "uploads"), filename)
+def _cek_akses_media(sesi):
+    """Foto & TTD siswa hanya boleh dilihat oleh guru pemilik sesi atau kepala sekolah."""
+    if session.get("kepsek_login"):
+        return True
+    if session.get("guru_id") == sesi.jadwal.guru_id:
+        return True
+    return False
+
+
+@app.route("/media/foto/<int:sesi_id>")
+def media_foto(sesi_id):
+    sesi = SesiPresensi.query.get_or_404(sesi_id)
+    if not _cek_akses_media(sesi):
+        return "Tidak punya akses", 403
+    if not sesi.foto_kegiatan_data:
+        return "Foto belum ada", 404
+    return Response(sesi.foto_kegiatan_data, mimetype=sesi.foto_kegiatan_mime or "image/jpeg")
+
+
+@app.route("/media/ttd/<int:sesi_id>")
+def media_ttd(sesi_id):
+    sesi = SesiPresensi.query.get_or_404(sesi_id)
+    if not _cek_akses_media(sesi):
+        return "Tidak punya akses", 403
+    if not sesi.ttd_siswa_data:
+        return "Tanda tangan belum ada", 404
+    return Response(sesi.ttd_siswa_data, mimetype=sesi.ttd_siswa_mime or "image/png")
 
 
 # ---------- Job terjadwal (dipanggil via cron eksternal / scheduler) ----------
@@ -486,18 +531,22 @@ def job_cek_tidak_hadir():
 @app.route("/api/jobs/cek-telat-berulang", methods=["POST"])
 def job_cek_telat_berulang():
     """Jalankan tiap malam: cek guru yang sudah telat >=3x bulan berjalan."""
-    bulan_ini = datetime.now().strftime("%Y-%m")
+    sekarang = datetime.now()
+    awal_bulan = date(sekarang.year, sekarang.month, 1)
+    akhir_bulan = date(sekarang.year, sekarang.month, calendar.monthrange(sekarang.year, sekarang.month)[1])
+    bulan_ini_label = sekarang.strftime("%Y-%m")
+
     guru_list = Guru.query.all()
     terkirim = 0
     for guru in guru_list:
         jumlah_telat = (
             SesiPresensi.query.join(Jadwal)
             .filter(Jadwal.guru_id == guru.id, SesiPresensi.status_masuk == "telat")
-            .filter(db.func.strftime("%Y-%m", SesiPresensi.tanggal) == bulan_ini)
+            .filter(SesiPresensi.tanggal >= awal_bulan, SesiPresensi.tanggal <= akhir_bulan)
             .count()
         )
         if jumlah_telat == 3:  # kirim sekali saat tepat mencapai 3x
-            pesan = pesan_telat_berulang(guru.nama, jumlah_telat, bulan_ini)
+            pesan = pesan_telat_berulang(guru.nama, jumlah_telat, bulan_ini_label)
             ok = kirim_telegram(pesan)
             db.session.add(NotifikasiLog(guru_id=guru.id, jenis="telat_berulang", pesan=pesan, terkirim=ok))
             terkirim += 1

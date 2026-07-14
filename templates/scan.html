@@ -10,19 +10,33 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
 <script>
+function ambilLokasi() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve({ lat: null, lng: null }); return; }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => resolve({ lat: null, lng: null }),  // izin ditolak / gagal -> tetap lanjut tanpa lokasi
+      { timeout: 8000, enableHighAccuracy: true }
+    );
+  });
+}
+
 function onScanSuccess(kode_qr) {
-  fetch("/api/scan-masuk", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({kode_qr})
-  })
-  .then(r => r.json())
-  .then(data => {
-    if (data.error) {
-      document.getElementById("status_msg").textContent = data.error;
-      return;
-    }
-    window.location.href = "/sesi/" + data.sesi_id;
+  document.getElementById("status_msg").textContent = "Memproses...";
+  ambilLokasi().then(({ lat, lng }) => {
+    fetch("/api/scan-masuk", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ kode_qr, lat, lng })
+    })
+    .then(r => r.json())
+    .then(data => {
+      if (data.error) {
+        document.getElementById("status_msg").textContent = data.error;
+        return;
+      }
+      window.location.href = "/sesi/" + data.sesi_id;
+    });
   });
 }
 
