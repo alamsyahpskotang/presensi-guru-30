@@ -5,6 +5,7 @@ from io import BytesIO
 from datetime import datetime, date, timedelta
 from functools import wraps
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for, send_file, Response
+from sqlalchemy import inspect, text
 import pandas as pd
 
 from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
@@ -83,6 +84,58 @@ def halaman_login():
 def logout():
     session.clear()
     return redirect(url_for("halaman_login"))
+
+
+@app.route("/migrasi-db/<kode_rahasia>")
+def migrasi_db(kode_rahasia):
+    """
+    Endpoint darurat untuk menambahkan kolom baru ke tabel yang sudah ada
+    (dipakai saat struktur model berubah setelah data sudah terlanjur ada),
+    tanpa perlu akses Shell dan TANPA menghapus data lama.
+    Akses lewat browser: https://domain-anda.com/migrasi-db/KODE_RAHASIA
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    is_postgres = db.engine.dialect.name == "postgresql"
+    tipe_binary = "BYTEA" if is_postgres else "BLOB"
+    tipe_teks_pendek = "VARCHAR(40)"
+    tipe_angka = "FLOAT"
+
+    kolom_baru = {
+        "foto_kegiatan_data": tipe_binary,
+        "foto_kegiatan_mime": tipe_teks_pendek,
+        "ttd_siswa_data": tipe_binary,
+        "ttd_siswa_mime": tipe_teks_pendek,
+        "lat_masuk": tipe_angka,
+        "lng_masuk": tipe_angka,
+        "jarak_masuk_meter": tipe_angka,
+        "lat_keluar": tipe_angka,
+        "lng_keluar": tipe_angka,
+        "jarak_keluar_meter": tipe_angka,
+    }
+
+    db.create_all()  # buat tabel yang sama sekali belum ada (kalau ada)
+
+    inspector = inspect(db.engine)
+    tabel_ada = inspector.get_table_names()
+    if "sesi_presensi" not in tabel_ada:
+        return "Tabel sesi_presensi belum ada sama sekali - db.create_all() seharusnya sudah membuatnya. Coba refresh."
+
+    kolom_ada = [c["name"] for c in inspector.get_columns("sesi_presensi")]
+    ditambahkan = []
+
+    with db.engine.connect() as conn:
+        for nama, tipe in kolom_baru.items():
+            if nama not in kolom_ada:
+                conn.execute(text(f"ALTER TABLE sesi_presensi ADD COLUMN {nama} {tipe}"))
+                ditambahkan.append(nama)
+        conn.commit()
+
+    if ditambahkan:
+        return "Migrasi berhasil. Kolom baru ditambahkan: " + ", ".join(ditambahkan)
+    return "Tidak ada kolom baru yang perlu ditambahkan - struktur database sudah sesuai."
 
 
 @app.route("/setup-data-awal/<kode_rahasia>")
