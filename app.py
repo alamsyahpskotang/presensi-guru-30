@@ -21,7 +21,16 @@ os.makedirs(UPLOAD_TTD, exist_ok=True)
 os.makedirs(INSTANCE_DIR, exist_ok=True)
 
 app = Flask(__name__)
-app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(INSTANCE_DIR, 'presensi.db')}"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+if DATABASE_URL:
+    # Render kasih URL dengan skema "postgres://", tapi SQLAlchemy versi baru
+    # butuh "postgresql://" - perbaiki otomatis di sini.
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
+else:
+    # Fallback untuk uji coba lokal di laptop (tidak permanen, tapi cukup untuk testing)
+    app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(INSTANCE_DIR, 'presensi.db')}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.secret_key = os.environ.get("SECRET_KEY", "ganti-secret-key-ini-di-produksi")
 KEPSEK_PIN = os.environ.get("KEPSEK_PIN", "999999")
