@@ -174,6 +174,137 @@ def setup_data_awal(kode_rahasia):
     return "Berhasil! Data contoh dibuat untuk hari %s. Login: Bu Sari/1234 atau Pak Budi/5678" % hari_ini
 
 
+@app.route("/admin/import-excel/<kode_rahasia>", methods=["GET", "POST"])
+def admin_import_excel(kode_rahasia):
+    """
+    Upload file jadwal Excel (format sama seperti jadwal_smpn30_contoh.xlsx)
+    langsung dari browser, tanpa perlu akses Shell (dikunci di tier gratis Render).
+    Akses: https://domain-anda.com/admin/import-excel/KODE_RAHASIA
+    KODE_RAHASIA pakai env var yang sama dengan setup-data-awal (SETUP_SECRET).
+
+    Bersifat UPSERT: guru/kelas yang namanya sudah ada akan diperbarui
+    (bukan dobel), jadwal lama untuk kombinasi guru+kelas+hari+jam_ke yang
+    sama akan ditimpa. TIDAK menghapus data presensi yang sudah tercatat.
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    if request.method == "GET":
+        return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia)
+
+    file = request.files.get("file_excel")
+    if not file or file.filename == "":
+        return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia,
+                                error="Belum ada file yang dipilih")
+
+    try:
+        xl = pd.read_excel(file, sheet_name=None, dtype=str)
+    except Exception as e:
+        return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia,
+                                error=f"Gagal membaca file Excel: {e}")
+
+    kolom_wajib = {
+        "Guru": ["nama", "nip", "mapel", "pin"],
+        "Kelas": ["nama_kelas", "kode_qr"],
+        "Jadwal": ["guru_nama", "kelas_nama", "hari", "jam_ke", "jam_mulai", "jam_selesai", "mapel"],
+    }
+    for sheet, kolom_list in kolom_wajib.items():
+        if sheet not in xl:
+            return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia,
+                                    error=f"File tidak punya sheet '{sheet}'")
+        hilang = [k for k in kolom_list if k not in xl[sheet].columns]
+        if hilang:
+            return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia,
+                                    error=f"Sheet '{sheet}' kurang kolom: {hilang}")
+
+    df_guru = xl["Guru"].dropna(subset=["nama"])
+    df_kelas = xl["Kelas"].dropna(subset=["nama_kelas"])
+    df_jadwal = xl["Jadwal"].dropna(subset=["guru_nama", "kelas_nama"])
+
+    HARI_VALID = {"Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"}
+
+    def format_jam(nilai):
+        if hasattr(nilai, "strftime"):
+            return nilai.strftime("%H:%M")
+        s = str(nilai).strip()
+        if len(s) == 4 and s.isdigit():
+            s = f"{s[:2]}:{s[2:]}"
+        return s
+
+    hasil = {"guru_baru": 0, "guru_update": 0, "kelas_baru": 0, "kelas_update": 0,
+             "jadwal_baru": 0, "jadwal_update": 0, "baris_dilewati": []}
+
+    peta_guru = {}
+    for _, row in df_guru.iterrows():
+        nama = row["nama"].strip()
+        guru = Guru.query.filter_by(nama=nama).first()
+        if guru:
+            guru.nip = row.get("nip") or guru.nip
+            guru.mapel = row.get("mapel") or guru.mapel
+            guru.pin = str(row.get("pin") or guru.pin)
+            hasil["guru_update"] += 1
+        else:
+            guru = Guru(nama=nama, nip=row.get("nip", ""), mapel=row.get("mapel", ""),
+                        pin=str(row.get("pin", "0000")))
+            db.session.add(guru)
+            hasil["guru_baru"] += 1
+        db.session.flush()
+        peta_guru[nama] = guru.id
+
+    peta_kelas = {}
+    for _, row in df_kelas.iterrows():
+        nama_kelas = row["nama_kelas"].strip()
+        kode_qr = row["kode_qr"].strip()
+        kelas = Kelas.query.filter_by(nama_kelas=nama_kelas).first()
+        if kelas:
+            kelas.kode_qr = kode_qr
+            hasil["kelas_update"] += 1
+        else:
+            kelas = Kelas(nama_kelas=nama_kelas, kode_qr=kode_qr)
+            db.session.add(kelas)
+            hasil["kelas_baru"] += 1
+        db.session.flush()
+        peta_kelas[nama_kelas] = kelas.id
+
+    for i, row in df_jadwal.iterrows():
+        guru_nama = row["guru_nama"].strip()
+        kelas_nama = row["kelas_nama"].strip()
+        hari = row["hari"].strip().capitalize()
+
+        if guru_nama not in peta_guru:
+            hasil["baris_dilewati"].append(f"Baris {i + 2}: guru '{guru_nama}' tidak ada di sheet Guru")
+            continue
+        if kelas_nama not in peta_kelas:
+            hasil["baris_dilewati"].append(f"Baris {i + 2}: kelas '{kelas_nama}' tidak ada di sheet Kelas")
+            continue
+        if hari not in HARI_VALID:
+            hasil["baris_dilewati"].append(f"Baris {i + 2}: hari '{hari}' tidak valid")
+            continue
+
+        guru_id = peta_guru[guru_nama]
+        kelas_id = peta_kelas[kelas_nama]
+        jam_ke = str(row["jam_ke"]).strip()
+        jam_mulai = format_jam(row["jam_mulai"])
+        jam_selesai = format_jam(row["jam_selesai"])
+        mapel = row.get("mapel", "")
+
+        jadwal = Jadwal.query.filter_by(guru_id=guru_id, kelas_id=kelas_id, hari=hari, jam_ke=jam_ke).first()
+        if jadwal:
+            jadwal.jam_mulai = jam_mulai
+            jadwal.jam_selesai = jam_selesai
+            jadwal.mapel = mapel
+            hasil["jadwal_update"] += 1
+        else:
+            jadwal = Jadwal(guru_id=guru_id, kelas_id=kelas_id, hari=hari, jam_ke=jam_ke,
+                            jam_mulai=jam_mulai, jam_selesai=jam_selesai, mapel=mapel)
+            db.session.add(jadwal)
+            hasil["jadwal_baru"] += 1
+
+    db.session.commit()
+    return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia, hasil=hasil)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")

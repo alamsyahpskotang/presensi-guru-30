@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Import Jadwal dari Excel{% endblock %}
+{% block content %}
+<h2>Import jadwal dari Excel</h2>
+
+{% if error %}
+<p class="error" style="color:#A32D2D;">{{ error }}</p>
+{% endif %}
+
+{% if hasil %}
+<div style="background:#EAF3DE; border-radius:8px; padding:14px; margin-bottom:16px;">
+  <p style="margin:0 0 8px; font-weight:600;">Hasil import:</p>
+  <p style="margin:2px 0;">Guru baru: {{ hasil.guru_baru }}, diperbarui: {{ hasil.guru_update }}</p>
+  <p style="margin:2px 0;">Kelas baru: {{ hasil.kelas_baru }}, diperbarui: {{ hasil.kelas_update }}</p>
+  <p style="margin:2px 0;">Jadwal baru: {{ hasil.jadwal_baru }}, diperbarui: {{ hasil.jadwal_update }}</p>
+  {% if hasil.baris_dilewati %}
+  <p style="margin:10px 0 4px; color:#A32D2D;">{{ hasil.baris_dilewati|length }} baris dilewati:</p>
+  <ul style="font-size:13px; margin:0;">
+    {% for pesan in hasil.baris_dilewati %}
+    <li>{{ pesan }}</li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p style="margin:10px 0 0; color:#0F6E56;">Semua baris berhasil diimpor tanpa error.</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<form method="POST" enctype="multipart/form-data">
+  <label>Pilih file Excel (.xlsx)</label>
+  <input type="file" name="file_excel" accept=".xlsx" required>
+  <button type="submit" class="btn-primary">Upload dan proses</button>
+</form>
+
+<p style="font-size:13px; color:#5F5E5A; margin-top:1rem;">
+  File harus punya 3 sheet dengan kolom persis: <b>Guru</b> (nama, nip, mapel, pin),
+  <b>Kelas</b> (nama_kelas, kode_qr), <b>Jadwal</b> (guru_nama, kelas_nama, hari,
+  jam_ke, jam_mulai, jam_selesai, mapel). Proses ini aman dijalankan berkali-kali
+  (upsert) — tidak akan membuat data guru/kelas dobel.
+</p>
+{% endblock %}
