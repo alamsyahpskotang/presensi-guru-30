@@ -1,6 +1,7 @@
 import os
 import base64
 import calendar
+import qrcode
 from io import BytesIO
 from datetime import datetime, date, timedelta
 from functools import wraps
@@ -10,6 +11,24 @@ import pandas as pd
 
 from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
+
+try:
+    from zoneinfo import ZoneInfo
+    _WIB = ZoneInfo("Asia/Jakarta")
+except Exception:
+    _WIB = None
+
+
+def waktu_sekarang():
+    """
+    Selalu mengembalikan waktu Indonesia Barat (WIB / UTC+7), apapun zona
+    waktu server-nya. PENTING: hosting seperti Render default jalan di UTC,
+    jadi kalau pakai datetime.now() biasa, jam yang dipakai untuk cek
+    tepat-waktu/telat akan meleset 7 jam dari waktu Indonesia.
+    """
+    if _WIB is not None:
+        return datetime.now(_WIB).replace(tzinfo=None)
+    return datetime.now() + timedelta(hours=7)  # fallback kalau zoneinfo tidak tersedia
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
@@ -163,7 +182,7 @@ def setup_data_awal(kode_rahasia):
     db.session.add_all([k1, k2])
     db.session.commit()
 
-    hari_ini = HARI_ID[datetime.now().weekday()]
+    hari_ini = HARI_ID[waktu_sekarang().weekday()]
     j1 = Jadwal(guru_id=g1.id, kelas_id=k1.id, hari=hari_ini, jam_ke="3-4",
                 jam_mulai="07:45", jam_selesai="09:15", mapel="IPA")
     j2 = Jadwal(guru_id=g2.id, kelas_id=k2.id, hari=hari_ini, jam_ke="1-2",
@@ -305,6 +324,24 @@ def admin_import_excel(kode_rahasia):
     return render_template("admin_import_excel.html", kode_rahasia=kode_rahasia, hasil=hasil)
 
 
+@app.route("/qr-image/<kode_qr>.png")
+def qr_image(kode_qr):
+    """Generate gambar QR code untuk sebuah kode_qr kelas, langsung dari server (tidak perlu Shell)."""
+    img = qrcode.make(kode_qr, box_size=10, border=2)
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/kepsek/qr-kelas")
+@kepsek_required
+def halaman_qr_kelas():
+    """Tampilkan semua QR kelas sekaligus - siap di-print atau screenshot per kelas."""
+    kelas_list = Kelas.query.order_by(Kelas.nama_kelas).all()
+    return render_template("kepsek_qr_kelas.html", kelas_list=kelas_list)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -337,6 +374,7 @@ def halaman_izin():
             jam_terdampak=request.form.get("jam_terdampak") or "semua",
             keterangan=request.form.get("keterangan", "").strip(),
             guru_pengganti_nama=request.form.get("guru_pengganti", "").strip() or None,
+            diajukan_pada=waktu_sekarang(),
         )
         db.session.add(izin)
         db.session.commit()
@@ -381,7 +419,7 @@ def kepsek_putuskan_izin(izin_id):
     izin = PengajuanIzin.query.get_or_404(izin_id)
     keputusan = request.form.get("keputusan")  # "disetujui" atau "ditolak"
     izin.status = keputusan
-    izin.diputuskan_pada = datetime.now()
+    izin.diputuskan_pada = waktu_sekarang()
     izin.catatan_kepsek = request.form.get("catatan", "").strip()
     db.session.commit()
     return redirect(url_for("halaman_kepsek_izin"))
@@ -501,7 +539,7 @@ def unduh_export():
 
 @app.route("/dashboard")
 def dashboard():
-    hari_ini = date.today()
+    hari_ini = waktu_sekarang().date()
     hari_ini_nama = HARI_ID[hari_ini.weekday()]
 
     sesi_list = SesiPresensi.query.filter_by(tanggal=hari_ini).all()
@@ -548,7 +586,7 @@ def api_scan_masuk():
     if not kelas:
         return jsonify({"error": "QR kelas tidak dikenali"}), 404
 
-    sekarang = datetime.now()
+    sekarang = waktu_sekarang()
     hari_ini_nama = HARI_ID[sekarang.weekday()]
     jam_sekarang = sekarang.strftime("%H:%M")
 
@@ -621,7 +659,7 @@ def api_simpan_ttd(sesi_id):
     sesi.ttd_siswa_data = base64.b64decode(encoded)
     sesi.ttd_siswa_mime = "image/png"
     sesi.nama_siswa_verifikasi = nama_siswa
-    sesi.waktu_ttd = datetime.now()
+    sesi.waktu_ttd = waktu_sekarang()
     db.session.commit()
     return jsonify({"ok": True})
 
@@ -637,7 +675,7 @@ def api_scan_keluar(sesi_id):
     lat = data.get("lat")
     lng = data.get("lng")
 
-    sesi.waktu_scan_keluar = datetime.now()
+    sesi.waktu_scan_keluar = waktu_sekarang()
 
     if lat is not None and lng is not None:
         sesi.lat_keluar = lat
@@ -687,7 +725,7 @@ def media_ttd(sesi_id):
 @app.route("/api/jobs/cek-tidak-hadir", methods=["POST"])
 def job_cek_tidak_hadir():
     """Jalankan setelah jam pelajaran berakhir untuk deteksi guru yang sama sekali tidak scan."""
-    sekarang = datetime.now()
+    sekarang = waktu_sekarang()
     hari_ini_nama = HARI_ID[sekarang.weekday()]
     jam_sekarang = sekarang.strftime("%H:%M")
 
@@ -715,7 +753,7 @@ def job_cek_tidak_hadir():
 @app.route("/api/jobs/cek-telat-berulang", methods=["POST"])
 def job_cek_telat_berulang():
     """Jalankan tiap malam: cek guru yang sudah telat >=3x bulan berjalan."""
-    sekarang = datetime.now()
+    sekarang = waktu_sekarang()
     awal_bulan = date(sekarang.year, sekarang.month, 1)
     akhir_bulan = date(sekarang.year, sekarang.month, calendar.monthrange(sekarang.year, sekarang.month)[1])
     bulan_ini_label = sekarang.strftime("%Y-%m")

@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}QR Code Kelas{% endblock %}
+{% block content %}
+<div class="no-print">
+  <h2>QR Code kelas</h2>
+  <p><a href="/dashboard">Kembali ke dashboard</a></p>
+  <p>Tempel QR ini di tiap ruang kelas. Klik tombol di bawah untuk cetak semuanya sekaligus.</p>
+  <button class="btn-primary" onclick="window.print()">Cetak semua QR</button>
+</div>
+
+{% if kelas_list|length == 0 %}
+<p class="no-print">Belum ada data kelas. Isi lewat menu import Excel dulu.</p>
+{% endif %}
+
+<div class="grid-qr">
+  {% for kelas in kelas_list %}
+  <div class="kartu-qr">
+    <img src="/qr-image/{{ kelas.kode_qr }}.png" alt="QR {{ kelas.nama_kelas }}">
+    <p class="label-qr">Kelas {{ kelas.nama_kelas }}</p>
+  </div>
+  {% endfor %}
+</div>
+
+<style>
+.grid-qr {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 16px;
+  margin-top: 1rem;
+}
+.kartu-qr {
+  border: 1px solid #ccc;
+  border-radius: 8px;
+  padding: 12px;
+  text-align: center;
+  background: #fff;
+}
+.kartu-qr img { width: 100%; max-width: 160px; height: auto; }
+.label-qr { font-weight: 600; margin: 8px 0 0; font-size: 15px; }
+
+@media print {
+  .nav-bar, .logo-wrap, .footer-app, .no-print { display: none !important; }
+  .kartu-qr { break-inside: avoid; page-break-inside: avoid; }
+  .grid-qr { grid-template-columns: repeat(2, 1fr); }
+}
+</style>
+{% endblock %}
