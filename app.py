@@ -8,6 +8,7 @@ from functools import wraps
 from flask import Flask, request, jsonify, render_template, session, redirect, url_for, send_file, Response
 from sqlalchemy import inspect, text
 import pandas as pd
+from PIL import Image, ImageDraw, ImageFont
 
 from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
@@ -29,6 +30,76 @@ def waktu_sekarang():
     if _WIB is not None:
         return datetime.now(_WIB).replace(tzinfo=None)
     return datetime.now() + timedelta(hours=7)  # fallback kalau zoneinfo tidak tersedia
+
+
+_FONT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static", "fonts", "DejaVuSans-Bold.ttf")
+
+
+def _muat_font(ukuran):
+    try:
+        return ImageFont.truetype(_FONT_PATH, ukuran)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def tempel_watermark_foto(foto_bytes, waktu, lat=None, lng=None, label_lokasi=None):
+    """
+    Tempelkan watermark tanggal/jam dan koordinat lokasi ke pojok kiri
+    bawah foto, mirip aplikasi kamera timestamp. Dilakukan di server
+    (bukan di HP) supaya tidak bisa dimanipulasi oleh guru.
+    """
+    try:
+        img = Image.open(BytesIO(foto_bytes)).convert("RGB")
+    except Exception:
+        return foto_bytes  # kalau bukan gambar valid, biarkan apa adanya
+
+    draw = ImageDraw.Draw(img, "RGBA")
+    lebar, tinggi = img.size
+
+    ukuran_font = max(16, int(lebar * 0.028))
+    font_tebal = _muat_font(ukuran_font)
+    font_kecil = _muat_font(int(ukuran_font * 0.75))
+
+    baris = [waktu.strftime("%A, %d %B %Y - %H:%M:%S WIB")]
+    if lat is not None and lng is not None:
+        baris.append(f"Lokasi: {lat:.5f}, {lng:.5f}")
+        if label_lokasi:
+            baris.append(label_lokasi)
+    else:
+        baris.append("Lokasi: tidak tersedia (izin GPS ditolak)")
+
+    HARI_ID_MAP = {"Monday": "Senin", "Tuesday": "Selasa", "Wednesday": "Rabu",
+                   "Thursday": "Kamis", "Friday": "Jumat", "Saturday": "Sabtu", "Sunday": "Minggu"}
+    BULAN_ID_MAP = {"January": "Januari", "February": "Februari", "March": "Maret", "April": "April",
+                     "May": "Mei", "June": "Juni", "July": "Juli", "August": "Agustus",
+                     "September": "September", "October": "Oktober", "November": "November", "December": "Desember"}
+    for nama_en, nama_id in HARI_ID_MAP.items():
+        baris[0] = baris[0].replace(nama_en, nama_id)
+    for nama_en, nama_id in BULAN_ID_MAP.items():
+        baris[0] = baris[0].replace(nama_en, nama_id)
+
+    margin = int(lebar * 0.02)
+    tinggi_baris = int(ukuran_font * 1.4)
+    tinggi_pita = margin + tinggi_baris * len(baris) + margin
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    overlay_draw = ImageDraw.Draw(overlay)
+    overlay_draw.rectangle(
+        [(0, tinggi - tinggi_pita), (lebar, tinggi)],
+        fill=(0, 0, 0, 140),
+    )
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    y = tinggi - tinggi_pita + margin
+    for i, teks in enumerate(baris):
+        font_pakai = font_tebal if i == 0 else font_kecil
+        draw.text((margin, y), teks, font=font_pakai, fill="white")
+        y += tinggi_baris
+
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    return buf.getvalue()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_DIR = os.path.join(BASE_DIR, "instance")
@@ -636,8 +707,17 @@ def api_upload_foto(sesi_id):
     if not file:
         return jsonify({"error": "Foto tidak ditemukan"}), 400
 
-    sesi.foto_kegiatan_data = file.read()
-    sesi.foto_kegiatan_mime = file.mimetype or "image/jpeg"
+    foto_bytes = file.read()
+    # Pakai koordinat yang sudah tercatat otomatis saat scan masuk (kelas yang sama),
+    # supaya tidak perlu minta izin GPS lagi khusus untuk foto.
+    lat = request.form.get("lat", type=float) if request.form.get("lat") else sesi.lat_masuk
+    lng = request.form.get("lng", type=float) if request.form.get("lng") else sesi.lng_masuk
+    label_lokasi = sesi.label_lokasi_masuk() if lat is not None else None
+
+    foto_bytes = tempel_watermark_foto(foto_bytes, waktu_sekarang(), lat=lat, lng=lng, label_lokasi=label_lokasi)
+
+    sesi.foto_kegiatan_data = foto_bytes
+    sesi.foto_kegiatan_mime = "image/jpeg"
     db.session.commit()
     return jsonify({"ok": True, "url": url_for("media_foto", sesi_id=sesi_id)})
 
