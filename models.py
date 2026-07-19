@@ -62,10 +62,15 @@ class SesiPresensi(db.Model):
     # Foto & TTD disimpan LANGSUNG di database (bukan file di disk server),
     # supaya tidak hilang saat server redeploy/restart (disk Render tier gratis
     # bersifat sementara / ephemeral).
+    # CATATAN: kolom *_data (BYTEA) dipakai sebagai fallback kalau Cloudinary
+    # belum dikonfigurasi. Kalau Cloudinary aktif, foto/TTD baru akan memakai
+    # kolom *_url dan kolom *_data akan kosong (menghemat kapasitas database).
     foto_kegiatan_data = db.Column(db.LargeBinary)
     foto_kegiatan_mime = db.Column(db.String(40))
+    foto_kegiatan_url = db.Column(db.String(500))
     ttd_siswa_data = db.Column(db.LargeBinary)
     ttd_siswa_mime = db.Column(db.String(40))
+    ttd_siswa_url = db.Column(db.String(500))
 
     nama_siswa_verifikasi = db.Column(db.String(120))
     waktu_ttd = db.Column(db.DateTime)
@@ -98,7 +103,9 @@ class SesiPresensi(db.Model):
 
     def kelengkapan_bukti(self):
         # Guru telat tetap wajib isi foto + TTD siswa di sisa jam pelajaran
-        return bool(self.foto_kegiatan_data) and bool(self.ttd_siswa_data)
+        ada_foto = bool(self.foto_kegiatan_data) or bool(self.foto_kegiatan_url)
+        ada_ttd = bool(self.ttd_siswa_data) or bool(self.ttd_siswa_url)
+        return ada_foto and ada_ttd
 
     def status_keluar(self, toleransi_menit=5):
         """Bandingkan waktu scan keluar dengan jam_selesai jadwal.

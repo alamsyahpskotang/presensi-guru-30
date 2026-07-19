@@ -10,6 +10,13 @@ from sqlalchemy import inspect, text
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    import cloudinary
+    import cloudinary.uploader
+    _CLOUDINARY_TERSEDIA = True
+except ImportError:
+    _CLOUDINARY_TERSEDIA = False
+
 from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
 
@@ -42,16 +49,29 @@ def _muat_font(ukuran):
         return ImageFont.load_default()
 
 
+LEBAR_MAKS_FOTO = 900  # cukup untuk dokumentasi kegiatan, drastis mengurangi ukuran file
+
+
 def tempel_watermark_foto(foto_bytes, waktu, lat=None, lng=None, label_lokasi=None):
     """
     Tempelkan watermark tanggal/jam dan koordinat lokasi ke pojok kiri
     bawah foto, mirip aplikasi kamera timestamp. Dilakukan di server
     (bukan di HP) supaya tidak bisa dimanipulasi oleh guru.
+
+    Foto juga otomatis diperkecil (maks 900px lebar) dan dikompres lebih
+    ketat, karena foto disimpan langsung di database - penting untuk
+    menghemat kapasitas storage (terutama di tier gratis Render yang
+    cuma 1 GB).
     """
     try:
         img = Image.open(BytesIO(foto_bytes)).convert("RGB")
     except Exception:
         return foto_bytes  # kalau bukan gambar valid, biarkan apa adanya
+
+    # Perkecil kalau lebih lebar dari batas maksimal, jaga rasio aspek
+    if img.width > LEBAR_MAKS_FOTO:
+        rasio = LEBAR_MAKS_FOTO / img.width
+        img = img.resize((LEBAR_MAKS_FOTO, int(img.height * rasio)), Image.LANCZOS)
 
     draw = ImageDraw.Draw(img, "RGBA")
     lebar, tinggi = img.size
@@ -98,7 +118,7 @@ def tempel_watermark_foto(foto_bytes, waktu, lat=None, lng=None, label_lokasi=No
         y += tinggi_baris
 
     buf = BytesIO()
-    img.save(buf, format="JPEG", quality=88)
+    img.save(buf, format="JPEG", quality=72, optimize=True)
     return buf.getvalue()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -127,6 +147,40 @@ SEKOLAH_LNG = os.environ.get("SEKOLAH_LNG")
 SEKOLAH_LAT = float(SEKOLAH_LAT) if SEKOLAH_LAT else None
 SEKOLAH_LNG = float(SEKOLAH_LNG) if SEKOLAH_LNG else None
 RADIUS_AMAN_METER = int(os.environ.get("RADIUS_AMAN_METER", "200"))
+
+# --- Cloudinary (opsional) - simpan foto/TTD sebagai file di Cloudinary,
+# bukan langsung di database, supaya kapasitas database (terutama tier
+# gratis Render yang cuma 1 GB) tidak cepat penuh. Kalau env var ini
+# tidak diisi, sistem otomatis kembali ke cara lama (simpan di database).
+CLOUDINARY_CLOUD_NAME = os.environ.get("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.environ.get("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.environ.get("CLOUDINARY_API_SECRET")
+CLOUDINARY_AKTIF = bool(
+    _CLOUDINARY_TERSEDIA and CLOUDINARY_CLOUD_NAME and CLOUDINARY_API_KEY and CLOUDINARY_API_SECRET
+)
+if CLOUDINARY_AKTIF:
+    cloudinary.config(
+        cloud_name=CLOUDINARY_CLOUD_NAME,
+        api_key=CLOUDINARY_API_KEY,
+        api_secret=CLOUDINARY_API_SECRET,
+        secure=True,
+    )
+
+
+def unggah_ke_cloudinary(file_bytes, public_id, resource_type="image"):
+    """Upload ke Cloudinary, kembalikan secure_url. Return None kalau gagal
+    (caller harus fallback ke simpan di database)."""
+    if not CLOUDINARY_AKTIF:
+        return None
+    try:
+        hasil = cloudinary.uploader.upload(
+            file_bytes, public_id=public_id, resource_type=resource_type,
+            folder="presensi_guru", overwrite=True,
+        )
+        return hasil.get("secure_url")
+    except Exception as e:
+        print(f"[cloudinary] gagal upload: {e}")
+        return None
 
 db.init_app(app)
 
@@ -196,8 +250,10 @@ def migrasi_db(kode_rahasia):
     kolom_baru = {
         "foto_kegiatan_data": tipe_binary,
         "foto_kegiatan_mime": tipe_teks_pendek,
+        "foto_kegiatan_url": "VARCHAR(500)",
         "ttd_siswa_data": tipe_binary,
         "ttd_siswa_mime": tipe_teks_pendek,
+        "ttd_siswa_url": "VARCHAR(500)",
         "lat_masuk": tipe_angka,
         "lng_masuk": tipe_angka,
         "jarak_masuk_meter": tipe_angka,
@@ -716,8 +772,17 @@ def api_upload_foto(sesi_id):
 
     foto_bytes = tempel_watermark_foto(foto_bytes, waktu_sekarang(), lat=lat, lng=lng, label_lokasi=label_lokasi)
 
-    sesi.foto_kegiatan_data = foto_bytes
-    sesi.foto_kegiatan_mime = "image/jpeg"
+    public_id = f"foto_kegiatan_{sesi_id}_{int(waktu_sekarang().timestamp())}"
+    url_cloudinary = unggah_ke_cloudinary(foto_bytes, public_id)
+
+    if url_cloudinary:
+        sesi.foto_kegiatan_url = url_cloudinary
+        sesi.foto_kegiatan_data = None  # tidak perlu simpan dobel di database
+        sesi.foto_kegiatan_mime = None
+    else:
+        # Cloudinary belum dikonfigurasi / gagal - fallback simpan di database seperti sebelumnya
+        sesi.foto_kegiatan_data = foto_bytes
+        sesi.foto_kegiatan_mime = "image/jpeg"
     db.session.commit()
     return jsonify({"ok": True, "url": url_for("media_foto", sesi_id=sesi_id)})
 
@@ -736,8 +801,19 @@ def api_simpan_ttd(sesi_id):
         return jsonify({"error": "Nama siswa dan tanda tangan wajib diisi"}), 400
 
     header, encoded = ttd_base64.split(",", 1) if "," in ttd_base64 else (None, ttd_base64)
-    sesi.ttd_siswa_data = base64.b64decode(encoded)
-    sesi.ttd_siswa_mime = "image/png"
+    ttd_bytes = base64.b64decode(encoded)
+
+    public_id = f"ttd_siswa_{sesi_id}_{int(waktu_sekarang().timestamp())}"
+    url_cloudinary = unggah_ke_cloudinary(ttd_bytes, public_id)
+
+    if url_cloudinary:
+        sesi.ttd_siswa_url = url_cloudinary
+        sesi.ttd_siswa_data = None
+        sesi.ttd_siswa_mime = None
+    else:
+        sesi.ttd_siswa_data = ttd_bytes
+        sesi.ttd_siswa_mime = "image/png"
+
     sesi.nama_siswa_verifikasi = nama_siswa
     sesi.waktu_ttd = waktu_sekarang()
     db.session.commit()
@@ -785,6 +861,8 @@ def media_foto(sesi_id):
     sesi = SesiPresensi.query.get_or_404(sesi_id)
     if not _cek_akses_media(sesi):
         return "Tidak punya akses", 403
+    if sesi.foto_kegiatan_url:
+        return redirect(sesi.foto_kegiatan_url)
     if not sesi.foto_kegiatan_data:
         return "Foto belum ada", 404
     return Response(sesi.foto_kegiatan_data, mimetype=sesi.foto_kegiatan_mime or "image/jpeg")
@@ -795,6 +873,8 @@ def media_ttd(sesi_id):
     sesi = SesiPresensi.query.get_or_404(sesi_id)
     if not _cek_akses_media(sesi):
         return "Tidak punya akses", 403
+    if sesi.ttd_siswa_url:
+        return redirect(sesi.ttd_siswa_url)
     if not sesi.ttd_siswa_data:
         return "Tanda tangan belum ada", 404
     return Response(sesi.ttd_siswa_data, mimetype=sesi.ttd_siswa_mime or "image/png")
