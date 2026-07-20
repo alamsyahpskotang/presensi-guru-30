@@ -173,3 +173,13 @@ class NotifikasiLog(db.Model):
     pesan = db.Column(db.Text)
     waktu_kirim = db.Column(db.DateTime, default=datetime.utcnow)
     terkirim = db.Column(db.Boolean, default=False)
+
+
+class PenerimaNotifikasi(db.Model):
+    """Orang yang mendaftar sendiri lewat bot Telegram (klik Start) untuk
+    menerima notifikasi presensi - tidak perlu Chat ID diinput manual oleh admin."""
+    id = db.Column(db.Integer, primary_key=True)
+    chat_id = db.Column(db.String(30), unique=True, nullable=False)
+    nama = db.Column(db.String(150))
+    terdaftar_pada = db.Column(db.DateTime, default=datetime.utcnow)
+    aktif = db.Column(db.Boolean, default=True)

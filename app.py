@@ -2,6 +2,7 @@ import os
 import base64
 import calendar
 import qrcode
+import requests
 from io import BytesIO
 from datetime import datetime, date, timedelta
 from functools import wraps
@@ -17,8 +18,33 @@ try:
 except ImportError:
     _CLOUDINARY_TERSEDIA = False
 
-from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, hitung_jarak_meter
+from models import db, Guru, Kelas, Jadwal, SesiPresensi, PengajuanIzin, NotifikasiLog, PenerimaNotifikasi, hitung_jarak_meter
 from notifier import kirim_telegram, pesan_tidak_hadir, pesan_telat_berulang, pesan_izin_diajukan, pesan_rekap_harian
+
+
+def kirim_notifikasi_semua(pesan):
+    """
+    Kirim notifikasi ke SEMUA penerima: gabungan dari env var KEPSEK_CHAT_ID
+    (diisi manual) DAN semua orang yang sudah daftar sendiri lewat bot
+    Telegram (tabel PenerimaNotifikasi, status aktif).
+    """
+    daftar = []
+    env_chat_id = os.environ.get("KEPSEK_CHAT_ID", "")
+    if env_chat_id:
+        daftar.extend([c.strip() for c in env_chat_id.split(",") if c.strip()])
+
+    try:
+        pendaftar_aktif = PenerimaNotifikasi.query.filter_by(aktif=True).all()
+        daftar.extend([p.chat_id for p in pendaftar_aktif])
+    except Exception as e:
+        print(f"[notifikasi] gagal ambil daftar pendaftar dari database: {e}")
+
+    daftar_unik = list(dict.fromkeys(daftar))  # buang duplikat, jaga urutan
+    if not daftar_unik:
+        print("[notifikasi] tidak ada penerima sama sekali, lewati pengiriman.")
+        return False
+
+    return kirim_telegram(pesan, chat_id=",".join(daftar_unik))
 
 try:
     from zoneinfo import ZoneInfo
@@ -286,6 +312,99 @@ def migrasi_db(kode_rahasia):
     return "Tidak ada kolom baru yang perlu ditambahkan - struktur database sudah sesuai."
 
 
+@app.route("/telegram/webhook/<kode_rahasia>", methods=["POST"])
+def telegram_webhook(kode_rahasia):
+    """
+    Menerima update dari Telegram setiap kali seseorang chat bot ini.
+    Kalau isinya "/start" (atau "/start KODE"), orang itu otomatis
+    terdaftar sebagai penerima notifikasi - tidak perlu Chat ID diinput
+    manual oleh admin lagi.
+    """
+    kode_webhook_asli = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_webhook_asli:
+        return "Kode rahasia salah", 403
+
+    update = request.get_json(silent=True) or {}
+    pesan_masuk = update.get("message") or {}
+    chat = pesan_masuk.get("chat") or {}
+    chat_id = str(chat.get("id", "")).strip()
+    teks = (pesan_masuk.get("text") or "").strip()
+
+    if not chat_id:
+        return jsonify({"ok": True})
+
+    nama_pengirim = (chat.get("first_name") or "").strip()
+    if chat.get("last_name"):
+        nama_pengirim += " " + chat.get("last_name").strip()
+    if not nama_pengirim:
+        nama_pengirim = chat.get("username") or f"Chat {chat_id}"
+
+    if teks.startswith("/start"):
+        kode_daftar_wajib = os.environ.get("TELEGRAM_KODE_DAFTAR", "").strip()
+        bagian = teks.split(maxsplit=1)
+        kode_diberikan = bagian[1].strip() if len(bagian) > 1 else ""
+
+        if kode_daftar_wajib and kode_diberikan != kode_daftar_wajib:
+            kirim_telegram(
+                "Maaf, pendaftaran gagal - kode tidak sesuai. "
+                "Silakan gunakan link pendaftaran resmi dari admin sekolah.",
+                chat_id=chat_id,
+            )
+            return jsonify({"ok": True})
+
+        penerima = PenerimaNotifikasi.query.filter_by(chat_id=chat_id).first()
+        if penerima:
+            penerima.aktif = True
+            penerima.nama = nama_pengirim
+            db.session.commit()
+            kirim_telegram(
+                f"Halo {nama_pengirim}! Anda sudah terdaftar sebelumnya untuk menerima "
+                f"notifikasi presensi guru GALUTA - SMPN 30 Tangerang.",
+                chat_id=chat_id,
+            )
+        else:
+            db.session.add(PenerimaNotifikasi(chat_id=chat_id, nama=nama_pengirim, aktif=True))
+            db.session.commit()
+            kirim_telegram(
+                f"Halo {nama_pengirim}! Pendaftaran berhasil ✅\n\n"
+                f"Anda akan menerima notifikasi otomatis presensi guru GALUTA - SMPN 30 Tangerang "
+                f"(guru tidak hadir, keterlambatan berulang, pengajuan izin baru).\n\n"
+                f"Kirim /stop kapan saja kalau ingin berhenti menerima notifikasi.",
+                chat_id=chat_id,
+            )
+
+    elif teks.startswith("/stop"):
+        penerima = PenerimaNotifikasi.query.filter_by(chat_id=chat_id).first()
+        if penerima and penerima.aktif:
+            penerima.aktif = False
+            db.session.commit()
+            kirim_telegram("Anda telah berhenti menerima notifikasi. Kirim /start kapan saja untuk aktif lagi.", chat_id=chat_id)
+
+    return jsonify({"ok": True})
+
+
+@app.route("/admin/set-telegram-webhook/<kode_rahasia>")
+def set_telegram_webhook(kode_rahasia):
+    """Jalankan SEKALI lewat browser untuk menghubungkan bot Telegram ke
+    aplikasi ini, supaya pendaftaran otomatis lewat /start bisa berfungsi."""
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if not token:
+        return "TELEGRAM_BOT_TOKEN belum diset di Environment Variables", 400
+
+    kode_webhook = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "ganti-kode-ini")
+    webhook_url = request.host_url.rstrip("/") + url_for("telegram_webhook", kode_rahasia=kode_webhook)
+
+    try:
+        resp = requests.post(f"https://api.telegram.org/bot{token}/setWebhook", data={"url": webhook_url}, timeout=10)
+        return f"Webhook diarahkan ke: {webhook_url}<br><br>Respons Telegram: {resp.text}"
+    except requests.RequestException as e:
+        return f"Gagal menghubungi Telegram: {e}", 500
+
+
 @app.route("/setup-data-awal/<kode_rahasia>")
 def setup_data_awal(kode_rahasia):
     """
@@ -509,7 +628,7 @@ def halaman_izin():
         db.session.commit()
 
         pesan = pesan_izin_diajukan(session.get("guru_nama"), tanggal.strftime("%d-%m-%Y"), KATEGORI_IZIN.get(izin.kategori, izin.kategori))
-        kirim_telegram(pesan)
+        kirim_notifikasi_semua(pesan)
 
         return redirect(url_for("halaman_izin_riwayat"))
 
@@ -590,6 +709,7 @@ def unduh_export():
 
     baris_detail = []
     for s in sesi_list:
+        ada_foto = bool(s.foto_kegiatan_data) or bool(s.foto_kegiatan_url)
         baris_detail.append({
             "Tanggal": s.tanggal.strftime("%Y-%m-%d"),
             "Hari": HARI_ID[s.tanggal.weekday()],
@@ -603,8 +723,8 @@ def unduh_export():
             "Status masuk": s.status_masuk or "",
             "Menit telat": s.menit_telat or 0,
             "Lokasi masuk": s.label_lokasi_masuk(RADIUS_AMAN_METER),
-            "Foto ada": "Ya" if s.foto_kegiatan_data else "Tidak",
-            "Link foto": (request.host_url.rstrip("/") + url_for("media_foto", sesi_id=s.id)) if s.foto_kegiatan_data else "",
+            "Foto ada": "Ya" if ada_foto else "Tidak",
+            "Link foto": (request.host_url.rstrip("/") + url_for("media_foto", sesi_id=s.id)) if ada_foto else "",
             "Nama siswa TTD": s.nama_siswa_verifikasi or "",
             "Jam scan keluar": s.waktu_scan_keluar.strftime("%H:%M") if s.waktu_scan_keluar else "",
             "Status keluar": s.status_keluar() or "",
@@ -966,7 +1086,7 @@ def job_cek_tidak_hadir():
             continue  # sudah ada izin resmi, tidak dianggap tidak hadir
 
         pesan = pesan_tidak_hadir(jadwal.guru.nama, jadwal.mapel, jadwal.kelas.nama_kelas, jadwal.jam_ke)
-        ok = kirim_telegram(pesan)
+        ok = kirim_notifikasi_semua(pesan)
         db.session.add(NotifikasiLog(guru_id=jadwal.guru_id, jenis="tidak_hadir", pesan=pesan, terkirim=ok))
         terkirim += 1
     db.session.commit()
@@ -992,7 +1112,7 @@ def job_cek_telat_berulang():
         )
         if jumlah_telat == 3:  # kirim sekali saat tepat mencapai 3x
             pesan = pesan_telat_berulang(guru.nama, jumlah_telat, bulan_ini_label)
-            ok = kirim_telegram(pesan)
+            ok = kirim_notifikasi_semua(pesan)
             db.session.add(NotifikasiLog(guru_id=guru.id, jenis="telat_berulang", pesan=pesan, terkirim=ok))
             terkirim += 1
     db.session.commit()
