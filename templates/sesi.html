@@ -39,12 +39,23 @@ navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } })
 document.getElementById("btn_foto").onclick = () => {
   canvas.width = video.videoWidth; canvas.height = video.videoHeight;
   canvas.getContext("2d").drawImage(video, 0, 0);
+  document.getElementById("foto_status").textContent = "Mengunggah...";
   canvas.toBlob(blob => {
+    if (!blob) {
+      document.getElementById("foto_status").textContent = "Gagal mengambil gambar dari kamera, coba lagi.";
+      return;
+    }
     const fd = new FormData();
     fd.append("foto", blob, "kegiatan.jpg");
     fetch(`/api/upload-foto/${sesiId}`, { method: "POST", body: fd })
-      .then(r => r.json())
-      .then(d => document.getElementById("foto_status").textContent = d.ok ? "Foto tersimpan" : d.error);
+      .then(r => r.json().then(d => ({ status: r.status, body: d })))
+      .then(({ status, body }) => {
+        document.getElementById("foto_status").textContent =
+          body.ok ? "Foto tersimpan" : ("Gagal: " + (body.error || ("kode " + status)));
+      })
+      .catch(err => {
+        document.getElementById("foto_status").textContent = "Gagal terhubung ke server: " + err;
+      });
   }, "image/jpeg", 0.85);
 };
 
@@ -92,17 +103,21 @@ document.getElementById("btn_clear_ttd").onclick = () => ctx.clearRect(0, 0, ttd
 document.getElementById("btn_simpan_ttd").onclick = () => {
   const nama_siswa = document.getElementById("nama_siswa").value;
   const ttd_base64 = ttdCanvas.toDataURL("image/png");
+  document.getElementById("ttd_status").textContent = "Menyimpan...";
   fetch(`/api/simpan-ttd/${sesiId}`, {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ nama_siswa, ttd_base64 })
   })
   .then(r => r.json())
   .then(d => {
-    document.getElementById("ttd_status").textContent = d.ok ? "Tanda tangan tersimpan" : d.error;
+    document.getElementById("ttd_status").textContent = d.ok ? "Tanda tangan tersimpan" : ("Gagal: " + d.error);
     if (d.ok) {
       ttdTersimpan = true;
       document.getElementById("reminder_ttd").style.display = "none";
     }
+  })
+  .catch(err => {
+    document.getElementById("ttd_status").textContent = "Gagal terhubung ke server: " + err;
   });
 };
 

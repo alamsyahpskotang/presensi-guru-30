@@ -174,12 +174,14 @@ def unggah_ke_cloudinary(file_bytes, public_id, resource_type="image"):
         return None
     try:
         hasil = cloudinary.uploader.upload(
-            file_bytes, public_id=public_id, resource_type=resource_type,
+            BytesIO(file_bytes), public_id=public_id, resource_type=resource_type,
             folder="presensi_guru", overwrite=True,
         )
         return hasil.get("secure_url")
     except Exception as e:
+        import traceback
         print(f"[cloudinary] gagal upload: {e}")
+        traceback.print_exc()
         return None
 
 db.init_app(app)
@@ -664,6 +666,52 @@ def unduh_export():
                       mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
+@app.route("/kepsek/bersihkan-dashboard", methods=["POST"])
+@kepsek_required
+def bersihkan_dashboard():
+    """
+    Menghapus SEMUA sesi presensi (dan foto/TTD terkait) untuk tanggal
+    hari ini saja - dipakai untuk membersihkan tampilan dashboard.
+    Data di tanggal-tanggal lain (untuk rekap Excel/pembinaan) TIDAK
+    ikut terhapus. Hanya bisa dipakai oleh kepala sekolah yang login.
+    """
+    hari_ini = waktu_sekarang().date()
+    jumlah = SesiPresensi.query.filter_by(tanggal=hari_ini).delete()
+    db.session.commit()
+    return redirect(url_for("dashboard", dibersihkan=jumlah))
+
+
+@app.route("/admin/diagnosa-foto/<kode_rahasia>")
+def diagnosa_foto(kode_rahasia):
+    """Halaman diagnostik sementara untuk cek kenapa foto tidak muncul di
+    dashboard, tanpa perlu akses Shell. Tampilkan 15 sesi terbaru beserta
+    status lengkap kolom foto/TTD-nya."""
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    sesi_list = SesiPresensi.query.order_by(SesiPresensi.id.desc()).limit(15).all()
+
+    baris = "<tr><th>ID</th><th>Guru</th><th>Tgl</th><th>foto_data ada?</th><th>foto_url</th><th>ttd_data ada?</th><th>ttd_url</th></tr>"
+    for s in sesi_list:
+        baris += (
+            f"<tr><td>{s.id}</td><td>{s.jadwal.guru.nama}</td><td>{s.tanggal}</td>"
+            f"<td>{'YA (' + str(len(s.foto_kegiatan_data)) + ' bytes)' if s.foto_kegiatan_data else 'tidak'}</td>"
+            f"<td>{s.foto_kegiatan_url or '-'}</td>"
+            f"<td>{'YA' if s.ttd_siswa_data else 'tidak'}</td>"
+            f"<td>{s.ttd_siswa_url or '-'}</td></tr>"
+        )
+
+    info_cloudinary = (
+        f"CLOUDINARY_AKTIF = {CLOUDINARY_AKTIF}<br>"
+        f"CLOUD_NAME terisi = {bool(CLOUDINARY_CLOUD_NAME)}<br>"
+        f"API_KEY terisi = {bool(CLOUDINARY_API_KEY)}<br>"
+        f"API_SECRET terisi = {bool(CLOUDINARY_API_SECRET)}<br>"
+    )
+
+    return f"<h3>Info konfigurasi Cloudinary</h3><p>{info_cloudinary}</p><h3>15 sesi terbaru</h3><table border='1' cellpadding='6'>{baris}</table>"
+
+
 @app.route("/dashboard")
 def dashboard():
     hari_ini = waktu_sekarang().date()
@@ -763,28 +811,35 @@ def api_upload_foto(sesi_id):
     if not file:
         return jsonify({"error": "Foto tidak ditemukan"}), 400
 
-    foto_bytes = file.read()
-    # Pakai koordinat yang sudah tercatat otomatis saat scan masuk (kelas yang sama),
-    # supaya tidak perlu minta izin GPS lagi khusus untuk foto.
-    lat = request.form.get("lat", type=float) if request.form.get("lat") else sesi.lat_masuk
-    lng = request.form.get("lng", type=float) if request.form.get("lng") else sesi.lng_masuk
-    label_lokasi = sesi.label_lokasi_masuk() if lat is not None else None
+    try:
+        foto_bytes = file.read()
+        # Pakai koordinat yang sudah tercatat otomatis saat scan masuk (kelas yang sama),
+        # supaya tidak perlu minta izin GPS lagi khusus untuk foto.
+        lat = request.form.get("lat", type=float) if request.form.get("lat") else sesi.lat_masuk
+        lng = request.form.get("lng", type=float) if request.form.get("lng") else sesi.lng_masuk
+        label_lokasi = sesi.label_lokasi_masuk() if lat is not None else None
 
-    foto_bytes = tempel_watermark_foto(foto_bytes, waktu_sekarang(), lat=lat, lng=lng, label_lokasi=label_lokasi)
+        foto_bytes = tempel_watermark_foto(foto_bytes, waktu_sekarang(), lat=lat, lng=lng, label_lokasi=label_lokasi)
 
-    public_id = f"foto_kegiatan_{sesi_id}_{int(waktu_sekarang().timestamp())}"
-    url_cloudinary = unggah_ke_cloudinary(foto_bytes, public_id)
+        public_id = f"foto_kegiatan_{sesi_id}_{int(waktu_sekarang().timestamp())}"
+        url_cloudinary = unggah_ke_cloudinary(foto_bytes, public_id)
 
-    if url_cloudinary:
-        sesi.foto_kegiatan_url = url_cloudinary
-        sesi.foto_kegiatan_data = None  # tidak perlu simpan dobel di database
-        sesi.foto_kegiatan_mime = None
-    else:
-        # Cloudinary belum dikonfigurasi / gagal - fallback simpan di database seperti sebelumnya
-        sesi.foto_kegiatan_data = foto_bytes
-        sesi.foto_kegiatan_mime = "image/jpeg"
-    db.session.commit()
-    return jsonify({"ok": True, "url": url_for("media_foto", sesi_id=sesi_id)})
+        if url_cloudinary:
+            sesi.foto_kegiatan_url = url_cloudinary
+            sesi.foto_kegiatan_data = None  # tidak perlu simpan dobel di database
+            sesi.foto_kegiatan_mime = None
+        else:
+            # Cloudinary belum dikonfigurasi / gagal - fallback simpan di database seperti sebelumnya
+            sesi.foto_kegiatan_data = foto_bytes
+            sesi.foto_kegiatan_mime = "image/jpeg"
+        db.session.commit()
+        return jsonify({"ok": True, "url": url_for("media_foto", sesi_id=sesi_id)})
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        print(f"[upload-foto] ERROR sesi {sesi_id}: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Gagal menyimpan foto di server: {e}"}), 500
 
 
 @app.route("/api/simpan-ttd/<int:sesi_id>", methods=["POST"])
@@ -801,23 +856,31 @@ def api_simpan_ttd(sesi_id):
         return jsonify({"error": "Nama siswa dan tanda tangan wajib diisi"}), 400
 
     header, encoded = ttd_base64.split(",", 1) if "," in ttd_base64 else (None, ttd_base64)
-    ttd_bytes = base64.b64decode(encoded)
 
-    public_id = f"ttd_siswa_{sesi_id}_{int(waktu_sekarang().timestamp())}"
-    url_cloudinary = unggah_ke_cloudinary(ttd_bytes, public_id)
+    try:
+        ttd_bytes = base64.b64decode(encoded)
 
-    if url_cloudinary:
-        sesi.ttd_siswa_url = url_cloudinary
-        sesi.ttd_siswa_data = None
-        sesi.ttd_siswa_mime = None
-    else:
-        sesi.ttd_siswa_data = ttd_bytes
-        sesi.ttd_siswa_mime = "image/png"
+        public_id = f"ttd_siswa_{sesi_id}_{int(waktu_sekarang().timestamp())}"
+        url_cloudinary = unggah_ke_cloudinary(ttd_bytes, public_id)
 
-    sesi.nama_siswa_verifikasi = nama_siswa
-    sesi.waktu_ttd = waktu_sekarang()
-    db.session.commit()
-    return jsonify({"ok": True})
+        if url_cloudinary:
+            sesi.ttd_siswa_url = url_cloudinary
+            sesi.ttd_siswa_data = None
+            sesi.ttd_siswa_mime = None
+        else:
+            sesi.ttd_siswa_data = ttd_bytes
+            sesi.ttd_siswa_mime = "image/png"
+
+        sesi.nama_siswa_verifikasi = nama_siswa
+        sesi.waktu_ttd = waktu_sekarang()
+        db.session.commit()
+        return jsonify({"ok": True})
+    except Exception as e:
+        db.session.rollback()
+        import traceback
+        print(f"[simpan-ttd] ERROR sesi {sesi_id}: {e}")
+        traceback.print_exc()
+        return jsonify({"error": f"Gagal menyimpan tanda tangan di server: {e}"}), 500
 
 
 @app.route("/api/scan-keluar/<int:sesi_id>", methods=["POST"])
