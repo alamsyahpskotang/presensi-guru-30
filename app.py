@@ -832,6 +832,58 @@ def diagnosa_foto(kode_rahasia):
     return f"<h3>Info konfigurasi Cloudinary</h3><p>{info_cloudinary}</p><h3>15 sesi terbaru</h3><table border='1' cellpadding='6'>{baris}</table>"
 
 
+@app.route("/admin/diagnosa-guru/<kode_rahasia>")
+def diagnosa_guru(kode_rahasia):
+    """
+    Halaman diagnostik untuk kasus 'guru dinyatakan tidak ada jadwal
+    padahal di Excel ada' - biasanya penyebabnya guru DOBEL/DUPLIKAT di
+    database (nama beda tipis antar proses import Excel yang berbeda
+    waktu), sehingga akun yang dipakai login tidak nyambung dengan
+    jadwal yang sebenarnya tersimpan di versi guru yang lain.
+
+    Cara pakai: /admin/diagnosa-guru/<kode>?nama=sebagian_nama
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    kata_kunci = request.args.get("nama", "").strip()
+
+    html = "<h3>Diagnosa data guru</h3>"
+    html += "<form method='get'><input name='nama' placeholder='ketik sebagian nama guru' value='" + kata_kunci + "' style='padding:8px; width:300px;'> <button type='submit'>Cari</button></form><br>"
+
+    if not kata_kunci:
+        html += "<p>Masukkan sebagian nama guru di kotak pencarian di atas, misal 'Dede'.</p>"
+        return html
+
+    guru_cocok = Guru.query.filter(Guru.nama.ilike(f"%{kata_kunci}%")).all()
+
+    if not guru_cocok:
+        html += f"<p style='color:red;'>Tidak ada guru dengan nama mengandung '{kata_kunci}'.</p>"
+        return html
+
+    if len(guru_cocok) > 1:
+        html += f"<p style='color:red; font-weight:bold;'>⚠️ DITEMUKAN {len(guru_cocok)} BARIS GURU dengan nama serupa - ini kemungkinan besar PENYEBAB masalahnya (data duplikat)!</p>"
+    else:
+        html += f"<p style='color:green;'>Cuma ada 1 baris guru dengan nama ini - kemungkinan bukan masalah duplikat.</p>"
+
+    html += "<table border='1' cellpadding='8'><tr><th>guru_id</th><th>Nama (persis)</th><th>PIN</th><th>Mapel</th><th>Jumlah baris di Jadwal</th></tr>"
+    for g in guru_cocok:
+        jumlah_jadwal = Jadwal.query.filter_by(guru_id=g.id).count()
+        html += f"<tr><td>{g.id}</td><td>'{g.nama}' (panjang: {len(g.nama)} karakter)</td><td>{g.pin}</td><td>{g.mapel}</td><td>{jumlah_jadwal}</td></tr>"
+    html += "</table>"
+
+    html += "<h4>Detail jadwal per guru_id yang ditemukan</h4>"
+    for g in guru_cocok:
+        jadwal_list = Jadwal.query.filter_by(guru_id=g.id).order_by(Jadwal.hari, Jadwal.jam_ke).all()
+        html += f"<p><b>guru_id={g.id} ('{g.nama}')</b> - {len(jadwal_list)} jadwal:</p><ul>"
+        for j in jadwal_list:
+            html += f"<li>{j.hari}, jam ke-{j.jam_ke} ({j.jam_mulai}-{j.jam_selesai}), kelas {j.kelas.nama_kelas}, {j.mapel}</li>"
+        html += "</ul>"
+
+    return html
+
+
 @app.route("/dashboard")
 def dashboard():
     hari_ini = waktu_sekarang().date()
