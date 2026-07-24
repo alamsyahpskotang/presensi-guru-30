@@ -164,6 +164,11 @@ else:
     app.config["SQLALCHEMY_DATABASE_URI"] = f"sqlite:///{os.path.join(INSTANCE_DIR, 'presensi.db')}"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 app.secret_key = os.environ.get("SECRET_KEY", "ganti-secret-key-ini-di-produksi")
+# Login guru/kepsek dibuat "permanen" (cookie punya masa berlaku jelas),
+# supaya tidak hilang cuma karena HP di-background/app lain dibuka lama.
+# Tanpa ini, sebagian browser HP (terutama saat Android mematikan tab
+# browser untuk hemat memori) bisa membuang cookie login begitu saja.
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 KEPSEK_PIN = os.environ.get("KEPSEK_PIN", "999999")
 
 # Koordinat sekolah untuk deteksi jarak scan (opsional - kalau tidak diset,
@@ -246,6 +251,7 @@ def halaman_login():
         guru = Guru.query.filter(Guru.nama.ilike(nama), Guru.pin == pin).first()
         if not guru:
             return render_template("login.html", error="Nama atau PIN salah")
+        session.permanent = True
         session["guru_id"] = guru.id
         session["guru_nama"] = guru.nama
         return redirect(url_for("halaman_scan"))
@@ -647,6 +653,7 @@ def halaman_login_kepsek():
     if request.method == "POST":
         pin = request.form.get("pin")
         if pin == KEPSEK_PIN:
+            session.permanent = True
             session["kepsek_login"] = True
             return redirect(url_for("halaman_kepsek_izin"))
         return render_template("kepsek_login.html", error="PIN salah")
