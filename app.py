@@ -241,9 +241,9 @@ def kepsek_required(f):
 @app.route("/login", methods=["GET", "POST"])
 def halaman_login():
     if request.method == "POST":
-        nama = request.form.get("nama")
-        pin = request.form.get("pin")
-        guru = Guru.query.filter_by(nama=nama, pin=pin).first()
+        nama = (request.form.get("nama") or "").strip()
+        pin = (request.form.get("pin") or "").strip()
+        guru = Guru.query.filter(Guru.nama.ilike(nama), Guru.pin == pin).first()
         if not guru:
             return render_template("login.html", error="Nama atau PIN salah")
         session["guru_id"] = guru.id
@@ -881,6 +881,126 @@ def diagnosa_guru(kode_rahasia):
             html += f"<li>{j.hari}, jam ke-{j.jam_ke} ({j.jam_mulai}-{j.jam_selesai}), kelas {j.kelas.nama_kelas}, {j.mapel}</li>"
         html += "</ul>"
 
+    return html
+
+
+@app.route("/admin/cari-duplikat-guru/<kode_rahasia>")
+def cari_duplikat_guru(kode_rahasia):
+    """
+    Pindai SEMUA guru di database, kelompokkan berdasarkan nama yang
+    disamakan (huruf besar/kecil dan spasi diabaikan), tampilkan grup
+    yang punya lebih dari 1 baris. Ini kemungkinan besar sumber masalah
+    'guru dinyatakan tidak ada jadwal padahal ada di Excel' - karena
+    beberapa kali proses import Excel di waktu berbeda bisa membuat
+    baris guru baru alih-alih menimpa yang lama, kalau penulisan
+    namanya sedikit beda (huruf besar/kecil, ada gelar, dll).
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    semua_guru = Guru.query.order_by(Guru.nama).all()
+
+    def normalisasi(nama):
+        # buang gelar di belakang koma, lalu upper-case tanpa spasi berlebih
+        tanpa_gelar = nama.split(",")[0]
+        return " ".join(tanpa_gelar.upper().split())
+
+    grup = {}
+    for g in semua_guru:
+        key = normalisasi(g.nama)
+        grup.setdefault(key, []).append(g)
+
+    grup_duplikat = {k: v for k, v in grup.items() if len(v) > 1}
+
+    html = "<h3>Guru dengan nama serupa (kemungkinan duplikat)</h3>"
+    html += f"<p>Total guru di database: {len(semua_guru)} | Grup terdeteksi duplikat: {len(grup_duplikat)}</p>"
+
+    if not grup_duplikat:
+        html += "<p style='color:green;'>Tidak ada duplikat terdeteksi. Aman.</p>"
+        return html
+
+    html += "<table border='1' cellpadding='8'><tr><th>Nama dasar</th><th>guru_id</th><th>Nama persis</th><th>PIN</th><th>Jumlah Jadwal</th><th>Saran</th></tr>"
+    for key, daftar in grup_duplikat.items():
+        daftar_dengan_jumlah = [(g, Jadwal.query.filter_by(guru_id=g.id).count()) for g in daftar]
+        daftar_dengan_jumlah.sort(key=lambda x: -x[1])  # yang jadwalnya paling banyak di atas
+        terbanyak_id = daftar_dengan_jumlah[0][0].id
+        for i, (g, jumlah) in enumerate(daftar_dengan_jumlah):
+            saran = f"<b>SIMPAN (guru_id={g.id})</b>" if i == 0 else f"gabung ke {terbanyak_id}"
+            html += f"<tr><td>{key}</td><td>{g.id}</td><td>{g.nama}</td><td>{g.pin}</td><td>{jumlah}</td><td>{saran}</td></tr>"
+
+    html += "</table>"
+    html += "<br><p>Untuk menggabungkan, buka <code>/admin/gabung-guru/&lt;kode&gt;</code> dan ikuti saran di kolom terakhir tabel di atas.</p>"
+    return html
+
+
+@app.route("/admin/gabung-guru/<kode_rahasia>", methods=["GET", "POST"])
+def gabung_guru(kode_rahasia):
+    """
+    Gabungkan beberapa baris guru duplikat jadi satu. Semua jadwal,
+    pengajuan izin, dan log notifikasi yang tadinya nempel di guru_id
+    duplikat akan dipindah ke guru_id utama, lalu baris duplikatnya
+    dihapus. TIDAK BISA DIBATALKAN - pastikan sudah benar sebelum submit.
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    if request.method == "GET":
+        return """
+        <h3>Gabungkan guru duplikat</h3>
+        <p>Lihat dulu <code>/admin/cari-duplikat-guru/&lt;kode&gt;</code> untuk tahu guru_id mana yang perlu digabung.</p>
+        <form method="POST">
+          <label>guru_id UTAMA (yang disimpan, biasanya yang jadwalnya paling lengkap):</label><br>
+          <input name="id_utama" required style="padding:8px; width:200px;"><br><br>
+          <label>guru_id DUPLIKAT yang mau digabung (pisah koma kalau lebih dari satu, misal: 54,75):</label><br>
+          <input name="id_duplikat" required style="padding:8px; width:300px;"><br><br>
+          <button type="submit" style="padding:10px 20px; background:#A32D2D; color:white; border:none; border-radius:6px;">Gabungkan sekarang (tidak bisa dibatalkan)</button>
+        </form>
+        """
+
+    id_utama = request.form.get("id_utama", "").strip()
+    id_duplikat_list = [x.strip() for x in request.form.get("id_duplikat", "").split(",") if x.strip()]
+
+    if not id_utama.isdigit() or not id_duplikat_list:
+        return "Input tidak valid - guru_id harus angka", 400
+
+    id_utama = int(id_utama)
+    guru_utama = Guru.query.get(id_utama)
+    if not guru_utama:
+        return f"guru_id {id_utama} tidak ditemukan", 404
+
+    hasil = []
+    for id_str in id_duplikat_list:
+        if not id_str.isdigit():
+            hasil.append(f"'{id_str}' dilewati (bukan angka)")
+            continue
+        id_dup = int(id_str)
+        if id_dup == id_utama:
+            hasil.append(f"guru_id {id_dup} dilewati (sama dengan id utama)")
+            continue
+        guru_dup = Guru.query.get(id_dup)
+        if not guru_dup:
+            hasil.append(f"guru_id {id_dup} tidak ditemukan, dilewati")
+            continue
+
+        jumlah_jadwal = Jadwal.query.filter_by(guru_id=id_dup).update({"guru_id": id_utama})
+        jumlah_izin = PengajuanIzin.query.filter_by(guru_id=id_dup).update({"guru_id": id_utama})
+        jumlah_log = NotifikasiLog.query.filter_by(guru_id=id_dup).update({"guru_id": id_utama})
+        nama_lama = guru_dup.nama
+        db.session.delete(guru_dup)
+        hasil.append(
+            f"guru_id {id_dup} ('{nama_lama}') digabung ke {id_utama}: "
+            f"{jumlah_jadwal} jadwal, {jumlah_izin} izin, {jumlah_log} log notifikasi dipindah, baris duplikat dihapus."
+        )
+
+    db.session.commit()
+
+    html = f"<h3>Hasil penggabungan ke guru_id {id_utama} ('{guru_utama.nama}')</h3><ul>"
+    for h in hasil:
+        html += f"<li>{h}</li>"
+    html += "</ul>"
+    html += f"<p>Total jadwal guru_id {id_utama} sekarang: {Jadwal.query.filter_by(guru_id=id_utama).count()}</p>"
     return html
 
 
