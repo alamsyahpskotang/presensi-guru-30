@@ -1011,6 +1011,112 @@ def gabung_guru(kode_rahasia):
     return html
 
 
+def _kelompokkan_guru_duplikat():
+    """Helper: kelompokkan semua Guru berdasarkan nama yang disamakan
+    (gelar dibuang, huruf besar/kecil & spasi diabaikan). Kembalikan
+    dict {nama_dasar: [list Guru]} HANYA untuk grup yang > 1 baris."""
+    def normalisasi(nama):
+        tanpa_gelar = nama.split(",")[0]
+        return " ".join(tanpa_gelar.upper().split())
+
+    semua_guru = Guru.query.all()
+    grup = {}
+    for g in semua_guru:
+        key = normalisasi(g.nama)
+        grup.setdefault(key, []).append(g)
+    return {k: v for k, v in grup.items() if len(v) > 1}
+
+
+@app.route("/admin/gabung-semua-duplikat/<kode_rahasia>", methods=["GET", "POST"])
+def gabung_semua_duplikat(kode_rahasia):
+    """
+    Gabungkan SEMUA guru duplikat sekaligus dalam satu klik - tidak perlu
+    input manual satu-satu. Untuk tiap grup nama yang mirip, baris dengan
+    JUMLAH JADWAL TERBANYAK otomatis dipilih sebagai yang disimpan,
+    sisanya digabungkan ke situ lalu dihapus.
+
+    Setelah semua digabung, dijalankan juga pembersihan jadwal yang jadi
+    dobel PERSIS (guru+kelas+hari+jam sama) akibat penggabungan - kalau
+    ada, yang disimpan adalah baris dengan id PALING BARU (hasil import
+    Excel paling terakhir/terbaru).
+
+    GET  = pratinjau dulu (tidak mengubah apapun)
+    POST = eksekusi sungguhan (TIDAK BISA DIBATALKAN)
+    """
+    kode_asli = os.environ.get("SETUP_SECRET", "ganti-kode-ini")
+    if kode_rahasia != kode_asli:
+        return "Kode rahasia salah", 403
+
+    grup_duplikat = _kelompokkan_guru_duplikat()
+
+    if not grup_duplikat:
+        return "<p style='color:green;'>Tidak ada duplikat terdeteksi. Tidak ada yang perlu digabung.</p>"
+
+    # Tentukan rencana: siapa "utama" (disimpan) dan siapa "duplikat" (digabung) per grup
+    rencana = []
+    for nama_dasar, daftar in grup_duplikat.items():
+        daftar_dengan_jumlah = [(g, Jadwal.query.filter_by(guru_id=g.id).count()) for g in daftar]
+        daftar_dengan_jumlah.sort(key=lambda x: (-x[1], x[0].id))  # jadwal terbanyak menang, seri -> id terkecil
+        utama = daftar_dengan_jumlah[0][0]
+        duplikat_list = [g for g, _ in daftar_dengan_jumlah[1:]]
+        rencana.append((nama_dasar, utama, duplikat_list))
+
+    if request.method == "GET":
+        html = f"<h3>Pratinjau penggabungan {len(rencana)} grup guru duplikat</h3>"
+        html += "<p style='color:red; font-weight:bold;'>Ini baru PRATINJAU, belum ada yang diubah. Scroll ke bawah untuk tombol eksekusi.</p>"
+        html += "<table border='1' cellpadding='6'><tr><th>Nama</th><th>Disimpan (guru_id)</th><th>Digabung & dihapus (guru_id)</th></tr>"
+        for nama_dasar, utama, duplikat_list in rencana:
+            id_duplikat_str = ", ".join(str(g.id) for g in duplikat_list)
+            html += f"<tr><td>{nama_dasar}</td><td>{utama.id} ('{utama.nama}')</td><td>{id_duplikat_str}</td></tr>"
+        html += "</table>"
+        html += """
+        <br>
+        <form method="POST">
+          <button type="submit" style="padding:12px 24px; background:#A32D2D; color:white; border:none; border-radius:6px; font-weight:bold;">
+            GABUNGKAN SEMUA SEKARANG (tidak bisa dibatalkan)
+          </button>
+        </form>
+        """
+        return html
+
+    # --- POST: eksekusi sungguhan ---
+    ringkasan = []
+    for nama_dasar, utama, duplikat_list in rencana:
+        for dup in duplikat_list:
+            jml_jadwal = Jadwal.query.filter_by(guru_id=dup.id).update({"guru_id": utama.id})
+            jml_izin = PengajuanIzin.query.filter_by(guru_id=dup.id).update({"guru_id": utama.id})
+            jml_log = NotifikasiLog.query.filter_by(guru_id=dup.id).update({"guru_id": utama.id})
+            db.session.delete(dup)
+            ringkasan.append(f"{nama_dasar}: guru_id {dup.id} -> {utama.id} ({jml_jadwal} jadwal, {jml_izin} izin, {jml_log} log)")
+    db.session.commit()
+
+    # --- Bersihkan jadwal yang jadi dobel PERSIS akibat penggabungan ---
+    semua_jadwal = Jadwal.query.order_by(Jadwal.id).all()
+    kelompok_slot = {}
+    for j in semua_jadwal:
+        key = (j.guru_id, j.kelas_id, j.hari, j.jam_ke)
+        kelompok_slot.setdefault(key, []).append(j)
+
+    jumlah_jadwal_dobel_dihapus = 0
+    for key, daftar_jadwal in kelompok_slot.items():
+        if len(daftar_jadwal) > 1:
+            daftar_jadwal.sort(key=lambda j: j.id)
+            for j_lama in daftar_jadwal[:-1]:  # simpan yang id-nya PALING BESAR (terbaru), hapus sisanya
+                db.session.delete(j_lama)
+                jumlah_jadwal_dobel_dihapus += 1
+    db.session.commit()
+
+    html = f"<h3>Selesai! {len(rencana)} grup guru berhasil digabung.</h3>"
+    html += f"<p>Jadwal dobel yang ikut terhapus setelah penggabungan: {jumlah_jadwal_dobel_dihapus} baris</p>"
+    html += f"<p>Total guru sekarang: {Guru.query.count()}</p>"
+    html += f"<p>Total jadwal sekarang: {Jadwal.query.count()}</p>"
+    html += "<details><summary>Detail lengkap (klik untuk buka)</summary><ul>"
+    for r in ringkasan:
+        html += f"<li>{r}</li>"
+    html += "</ul></details>"
+    return html
+
+
 @app.route("/dashboard")
 def dashboard():
     hari_ini = waktu_sekarang().date()
